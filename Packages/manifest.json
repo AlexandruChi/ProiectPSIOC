@@ -13,7 +13,6 @@
     "com.unity.xr.management": "4.6.0",
     "com.unity.xr.meta-openxr": "2.5.1",
     "com.unity.xr.openxr": "1.17.1",
-    "com.unity.ai.assistant": "2.9.0-pre.2",
-    "com.unity.ai.inference": "2.3.0"
+    "com.unity.modules.video": "1.0.0"
   }
 }
