@@ -7,11 +7,11 @@ using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.XR.Interaction.Toolkit;
 using UnityEngine.XR.Interaction.Toolkit.Interactables;
+using UnityEngine.XR.Interaction.Toolkit.Interactors;
 using UnityEngine.XR.Interaction.Toolkit.Locomotion.Teleportation;
 
 /// <summary>
-/// Builds a simple VR room (floor, walls, ceiling, lights) with a table, two chairs and
-/// grabbable objects on the table. Menu: Tools > VR Room.
+/// Builds the VR room and its shape-sorting game. Menu: Tools > VR Room.
 /// </summary>
 public static class VRRoomBuilder
 {
@@ -20,8 +20,6 @@ public static class VRRoomBuilder
 
     const string XROriginPrefab = "Assets/VRTemplateAssets/Prefabs/Setup/Complete XR Origin Set Up Variant.prefab";
     const string XROriginFallback = "Assets/Samples/XR Interaction Toolkit/3.5.1/Starter Assets/Prefabs/XR Origin (XR Rig).prefab";
-    const string InteractablesDir = "Assets/VRTemplateAssets/Prefabs/Interactables/";
-
     // Room dimensions (metres)
     const float RoomW = 6f, RoomD = 6f, RoomH = 3f, WallT = 0.1f;
     // Table
@@ -50,6 +48,30 @@ public static class VRRoomBuilder
     {
         BuildRoom();
         if (Object.FindAnyObjectByType<XROrigin>() == null) AddXROrigin();
+        EditorSceneManager.MarkSceneDirty(EditorSceneManager.GetActiveScene());
+        AssetDatabase.SaveAssets();
+    }
+
+    [MenuItem("Tools/VR Room/Build Shape Sorting Game On Existing Table")]
+    public static void BuildShapeSortingGameOnExistingTable()
+    {
+        var table = GameObject.Find("Table");
+        if (table == null)
+        {
+            Debug.LogWarning("[VRRoom] No object named 'Table' was found in the active scene.");
+            return;
+        }
+
+        var oldGame = table.transform.Find("Shape Sorting Game");
+        if (oldGame != null)
+            Object.DestroyImmediate(oldGame.gameObject);
+
+        var room = GameObject.Find("VR Room");
+        var oldTableObjects = room != null ? room.transform.Find("Table Objects") : null;
+        if (oldTableObjects != null)
+            Object.DestroyImmediate(oldTableObjects.gameObject);
+
+        BuildShapeSortingGame(table.transform);
         EditorSceneManager.MarkSceneDirty(EditorSceneManager.GetActiveScene());
         AssetDatabase.SaveAssets();
     }
@@ -113,8 +135,10 @@ public static class VRRoomBuilder
         // --- Lights
         BuildLights(room, mLegs, mLampShade);
 
-        // --- Grabbable objects on the table
-        PlaceGrabbables(room);
+        // --- Shape sorting game on the table
+        var table = room.Find("Table");
+        if (table != null)
+            BuildShapeSortingGame(table);
     }
 
     static void BuildTable(Transform parent, Material top, Material legs)
@@ -217,56 +241,354 @@ public static class VRRoomBuilder
         win.shadows = LightShadows.None;
     }
 
-    static void PlaceGrabbables(Transform parent)
+    const float SortingBoxW = 0.72f;
+    const float SortingBoxD = 0.46f;
+    const float SortingBoxH = 0.22f;
+    const float SortingWallT = 0.02f;
+
+    enum SortingShape
     {
-        var group = new GameObject("Table Objects").transform;
-        group.SetParent(parent, false);
+        Cube,
+        Sphere,
+        Cylinder,
+        Tetrahedron,
+        Star
+    }
 
-        string[] prefabs =
+    struct SortingHole
+    {
+        public SortingHole(SortingShape shape, Vector2 center, float width, float height)
         {
-            "Cube Interactable.prefab",
-            "Sphere Interactable.prefab",
-            "Cylinder Interactable Variant.prefab",
-            "Torus Interactable Variant.prefab",
-        };
-        float y = TableH + 0.12f;
-        Vector3[] spots =
-        {
-            new Vector3(-0.5f, y, -0.15f),
-            new Vector3(-0.17f, y, 0.1f),
-            new Vector3(0.17f, y, -0.15f),
-            new Vector3(0.5f, y, 0.1f),
-        };
-
-        int placed = 0;
-        for (int i = 0; i < prefabs.Length; i++)
-        {
-            var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(InteractablesDir + prefabs[i]);
-            if (prefab == null) continue;
-            var go = (GameObject)PrefabUtility.InstantiatePrefab(prefab, group);
-            go.transform.position = TablePos + spots[i];
-            go.transform.rotation = Quaternion.identity;
-            placed++;
+            Shape = shape;
+            Center = center;
+            Width = width;
+            Height = height;
         }
 
-        // Fallback: simple grabbable cubes if the template prefabs aren't present
-        if (placed == 0)
+        public SortingShape Shape;
+        public Vector2 Center;
+        public float Width;
+        public float Height;
+    }
+
+    struct SortingPieceDefinition
+    {
+        public SortingPieceDefinition(SortingShape shape, PrimitiveType primitive, Color color, Vector3 size, Vector3 position)
         {
-            var mat = Mat("Grab_Orange", new Color(1f, 0.55f, 0.15f), 0.5f);
-            for (int i = 0; i < spots.Length; i++)
+            Shape = shape;
+            Primitive = primitive;
+            Color = color;
+            Size = size;
+            Position = position;
+        }
+
+        public SortingShape Shape;
+        public PrimitiveType Primitive;
+        public Color Color;
+        public Vector3 Size;
+        public Vector3 Position;
+    }
+
+    static readonly SortingHole[] SortingHoles =
+    {
+        new SortingHole(SortingShape.Cube, new Vector2(-0.18f, 0.08f), 0.11f, 0.11f),
+        new SortingHole(SortingShape.Sphere, new Vector2(-0.02f, 0.08f), 0.085f, 0.085f),
+        new SortingHole(SortingShape.Cylinder, new Vector2(0.18f, 0.08f), 0.115f, 0.115f),
+        new SortingHole(SortingShape.Tetrahedron, new Vector2(-0.09f, -0.12f), 0.12f, 0.12f),
+        new SortingHole(SortingShape.Star, new Vector2(0.15f, -0.12f), 0.12f, 0.12f)
+    };
+
+    static void BuildShapeSortingGame(Transform table)
+    {
+        var root = new GameObject("Shape Sorting Game").transform;
+        root.SetParent(table, false);
+        root.localPosition = new Vector3(0f, GetTableTopLocalY(table), 0f);
+
+        var box = new GameObject("Sorting Box").transform;
+        box.SetParent(root, false);
+        box.localPosition = Vector3.up * (SortingBoxH * 0.5f);
+
+        var boxMat = Mat("SortingBox_Blue", new Color(0.73f, 0.88f, 0.96f), 0.25f);
+        var bottom = Box("Bottom", box, new Vector3(0f, -SortingBoxH * 0.5f + SortingWallT * 0.5f, 0f),
+            new Vector3(SortingBoxW, SortingWallT, SortingBoxD), boxMat);
+        GameObjectUtility.SetStaticEditorFlags(bottom, 0);
+
+        Box("Wall_Front", box, new Vector3(0f, 0f, -SortingBoxD * 0.5f + SortingWallT * 0.5f),
+            new Vector3(SortingBoxW, SortingBoxH, SortingWallT), boxMat);
+        Box("Wall_Back", box, new Vector3(0f, 0f, SortingBoxD * 0.5f - SortingWallT * 0.5f),
+            new Vector3(SortingBoxW, SortingBoxH, SortingWallT), boxMat);
+        Box("Wall_Left", box, new Vector3(-SortingBoxW * 0.5f + SortingWallT * 0.5f, 0f, 0f),
+            new Vector3(SortingWallT, SortingBoxH, SortingBoxD), boxMat);
+        Box("Wall_Right", box, new Vector3(SortingBoxW * 0.5f - SortingWallT * 0.5f, 0f, 0f),
+            new Vector3(SortingWallT, SortingBoxH, SortingBoxD), boxMat);
+
+        var top = new GameObject("Top With Openings");
+        top.transform.SetParent(box, false);
+        top.transform.localPosition = new Vector3(0f, SortingBoxH * 0.5f - SortingWallT * 0.5f, 0f);
+        var topMesh = CreateSortingTopMesh(SortingBoxW - SortingWallT, SortingBoxD - SortingWallT, SortingHoles);
+        top.AddComponent<MeshFilter>().sharedMesh = topMesh;
+        top.AddComponent<MeshRenderer>().sharedMaterial = Mat("SortingBox_Top", new Color(0.82f, 0.92f, 1f), 0.25f);
+        var topCollider = top.AddComponent<MeshCollider>();
+        topCollider.sharedMesh = topMesh;
+        topCollider.convex = false;
+
+        var pieces = new[]
+        {
+            new SortingPieceDefinition(SortingShape.Cube, PrimitiveType.Cube, new Color(0.9f, 0.12f, 0.12f), new Vector3(0.1f, 0.1f, 0.1f), new Vector3(-0.55f, 0.08f, -0.27f)),
+            new SortingPieceDefinition(SortingShape.Sphere, PrimitiveType.Sphere, new Color(1f, 0.78f, 0.05f), new Vector3(0.076f, 0.076f, 0.076f), new Vector3(-0.55f, 0.08f, 0f)),
+            new SortingPieceDefinition(SortingShape.Cylinder, PrimitiveType.Cylinder, new Color(0.12f, 0.65f, 0.22f), new Vector3(0.105f, 0.06f, 0.105f), new Vector3(-0.55f, 0.08f, 0.27f)),
+            new SortingPieceDefinition(SortingShape.Tetrahedron, PrimitiveType.Cube, new Color(1f, 0.55f, 0.15f), new Vector3(0.105f, 0.105f, 0.105f), new Vector3(0.55f, 0.08f, -0.14f)),
+            new SortingPieceDefinition(SortingShape.Star, PrimitiveType.Cube, new Color(0.57f, 0.24f, 0.85f), new Vector3(0.11f, 0.055f, 0.11f), new Vector3(0.55f, 0.08f, 0.14f))
+        };
+
+        for (int i = 0; i < pieces.Length; i++)
+            CreateSortingPiece(root, pieces[i], i);
+
+        for (int i = 0; i < SortingHoles.Length; i++)
+            CreateSortingSocket(box, SortingHoles[i], i);
+    }
+
+    static float GetTableTopLocalY(Transform table)
+    {
+        var top = table.Find("Top");
+        return top != null ? top.localPosition.y + top.localScale.y * 0.5f : TableH;
+    }
+
+    static void CreateSortingPiece(Transform parent, SortingPieceDefinition definition, int index)
+    {
+        GameObject piece;
+        Mesh mesh;
+        if (definition.Shape == SortingShape.Tetrahedron || definition.Shape == SortingShape.Star)
+        {
+            piece = new GameObject(definition.Shape + " Piece");
+            mesh = definition.Shape == SortingShape.Tetrahedron ? CreateTetrahedronMesh() : CreateStarPrismMesh();
+            piece.AddComponent<MeshFilter>().sharedMesh = mesh;
+            piece.AddComponent<MeshRenderer>().sharedMaterial = Mat("SortingShape_" + definition.Shape,
+                definition.Color, 0.35f);
+        }
+        else
+        {
+            piece = GameObject.CreatePrimitive(definition.Primitive);
+            piece.name = definition.Shape + " Piece";
+            mesh = piece.GetComponent<MeshFilter>().sharedMesh;
+            Object.DestroyImmediate(piece.GetComponent<Collider>());
+            piece.GetComponent<Renderer>().sharedMaterial = Mat("SortingShape_" + definition.Shape,
+                definition.Color, 0.35f);
+        }
+
+        piece.transform.SetParent(parent, false);
+        piece.transform.localPosition = definition.Position;
+        piece.transform.localScale = definition.Size;
+
+        var meshCollider = piece.AddComponent<MeshCollider>();
+        meshCollider.sharedMesh = mesh;
+        meshCollider.convex = true;
+
+        var body = piece.AddComponent<Rigidbody>();
+        body.mass = 0.3f;
+        body.interpolation = RigidbodyInterpolation.Interpolate;
+        body.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+
+        var grab = piece.AddComponent<XRGrabInteractable>();
+        grab.throwOnDetach = true;
+        grab.trackRotation = true;
+        grab.interactionLayers = new InteractionLayerMask { value = (1 << 0) | (1 << (index + 1)) };
+    }
+
+    static void CreateSortingSocket(Transform box, SortingHole hole, int index)
+    {
+        var socketObject = new GameObject(hole.Shape + " Opening Socket");
+        socketObject.transform.SetParent(box, false);
+        socketObject.transform.localPosition = new Vector3(hole.Center.x, SortingBoxH * 0.5f, hole.Center.y);
+
+        var trigger = socketObject.AddComponent<SphereCollider>();
+        trigger.isTrigger = true;
+        trigger.radius = Mathf.Max(hole.Width, hole.Height) * 0.55f;
+
+        var attach = new GameObject("Attach");
+        attach.transform.SetParent(socketObject.transform, false);
+        attach.transform.localPosition = Vector3.down * (SortingBoxH * 0.45f);
+
+        var socket = socketObject.AddComponent<XRSocketInteractor>();
+        socket.attachTransform = attach.transform;
+        socket.interactionLayers = new InteractionLayerMask { value = 1 << (index + 1) };
+    }
+
+    static Mesh CreateSortingTopMesh(float width, float depth, SortingHole[] holes)
+    {
+        const float cellSize = 0.003f;
+        int xCells = Mathf.CeilToInt(width / cellSize);
+        int zCells = Mathf.CeilToInt(depth / cellSize);
+        var vertices = new Vector3[(xCells + 1) * (zCells + 1)];
+        var triangles = new List<int>();
+        var holePolygons = new Vector2[holes.Length][];
+        float halfWidth = width * 0.5f;
+        float halfDepth = depth * 0.5f;
+
+        for (int i = 0; i < holes.Length; i++)
+        {
+            if (holes[i].Shape == SortingShape.Tetrahedron || holes[i].Shape == SortingShape.Star)
+                holePolygons[i] = CreateHolePolygon(holes[i]);
+        }
+
+        for (int z = 0; z <= zCells; z++)
+        {
+            float localZ = Mathf.Lerp(-halfDepth, halfDepth, z / (float)zCells);
+            for (int x = 0; x <= xCells; x++)
             {
-                var cube = GameObject.CreatePrimitive(PrimitiveType.Cube);
-                cube.name = "Grab Cube " + (i + 1);
-                cube.transform.SetParent(group, false);
-                cube.transform.position = TablePos + spots[i];
-                cube.transform.localScale = Vector3.one * 0.08f;
-                cube.GetComponent<Renderer>().sharedMaterial = mat;
-                var rb = cube.AddComponent<Rigidbody>();
-                rb.mass = 0.3f;
-                rb.interpolation = RigidbodyInterpolation.Interpolate;
-                cube.AddComponent<XRGrabInteractable>();
+                float localX = Mathf.Lerp(-halfWidth, halfWidth, x / (float)xCells);
+                vertices[z * (xCells + 1) + x] = new Vector3(localX, 0f, localZ);
             }
         }
+
+        for (int z = 0; z < zCells; z++)
+        {
+            for (int x = 0; x < xCells; x++)
+            {
+                var center = new Vector2(
+                    Mathf.Lerp(-halfWidth, halfWidth, (x + 0.5f) / xCells),
+                    Mathf.Lerp(-halfDepth, halfDepth, (z + 0.5f) / zCells));
+                if (IsInsideSortingHole(center, holes, holePolygons))
+                    continue;
+
+                int a = z * (xCells + 1) + x;
+                int b = a + 1;
+                int c = a + xCells + 1;
+                int d = c + 1;
+                triangles.Add(a); triangles.Add(d); triangles.Add(b);
+                triangles.Add(a); triangles.Add(c); triangles.Add(d);
+            }
+        }
+
+        var mesh = new Mesh { name = "Sorting Box Top With Five Openings" };
+        mesh.indexFormat = IndexFormat.UInt32;
+        mesh.vertices = vertices;
+        mesh.triangles = triangles.ToArray();
+        mesh.RecalculateNormals();
+        mesh.RecalculateBounds();
+        return mesh;
+    }
+
+    static bool IsInsideSortingHole(Vector2 point, SortingHole[] holes, Vector2[][] holePolygons)
+    {
+        for (int i = 0; i < holes.Length; i++)
+        {
+            var hole = holes[i];
+            var local = point - hole.Center;
+            if (hole.Shape == SortingShape.Cube)
+            {
+                if (Mathf.Abs(local.x) <= hole.Width * 0.5f && Mathf.Abs(local.y) <= hole.Height * 0.5f)
+                    return true;
+            }
+            else if (hole.Shape == SortingShape.Sphere || hole.Shape == SortingShape.Cylinder)
+            {
+                float radius = hole.Width * 0.5f;
+                if (local.sqrMagnitude <= radius * radius)
+                    return true;
+            }
+            else if (PointInPolygon(local, holePolygons[i]))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    static Vector2[] CreateHolePolygon(SortingHole hole)
+    {
+        int count = hole.Shape == SortingShape.Tetrahedron ? 3 : 10;
+        var points = new Vector2[count];
+        for (int i = 0; i < count; i++)
+        {
+            if (hole.Shape == SortingShape.Tetrahedron)
+            {
+                points[i] = i == 0 ? new Vector2(-0.5f, -0.3f) :
+                    i == 1 ? new Vector2(0.5f, -0.3f) : new Vector2(0f, 0.6f);
+                points[i] = Vector2.Scale(points[i], new Vector2(hole.Width, hole.Height));
+            }
+            else
+            {
+                float angle = -Mathf.PI * 0.5f + i * Mathf.PI / 5f;
+                float radius = (i % 2 == 0 ? 0.5f : 0.22f);
+                points[i] = new Vector2(Mathf.Cos(angle) * radius * hole.Width,
+                    Mathf.Sin(angle) * radius * hole.Height);
+            }
+        }
+
+        return points;
+    }
+
+    static bool PointInPolygon(Vector2 point, Vector2[] polygon)
+    {
+        bool inside = false;
+        for (int i = 0, j = polygon.Length - 1; i < polygon.Length; j = i++)
+        {
+            var a = polygon[i];
+            var b = polygon[j];
+            if ((a.y > point.y) != (b.y > point.y) &&
+                point.x < (b.x - a.x) * (point.y - a.y) / (b.y - a.y) + a.x)
+                inside = !inside;
+        }
+
+        return inside;
+    }
+
+    static Mesh CreateTetrahedronMesh()
+    {
+        var mesh = new Mesh { name = "Procedural Tetrahedron" };
+        mesh.vertices = new[]
+        {
+            new Vector3(-0.5f, -0.29f, -0.3f), new Vector3(0.5f, -0.29f, -0.3f),
+            new Vector3(0f, -0.29f, 0.6f), new Vector3(0f, 0.58f, 0f)
+        };
+        mesh.triangles = new[] { 0, 1, 2, 0, 3, 1, 1, 3, 2, 2, 3, 0 };
+        mesh.RecalculateNormals();
+        mesh.RecalculateBounds();
+        return mesh;
+    }
+
+    static Mesh CreateStarPrismMesh()
+    {
+        const int pointCount = 10;
+        const float depth = 0.5f;
+        var points = new Vector2[pointCount];
+        var vertices = new List<Vector3>();
+        var triangles = new List<int>();
+
+        for (int i = 0; i < pointCount; i++)
+        {
+            float angle = -Mathf.PI * 0.5f + i * Mathf.PI / 5f;
+            float radius = i % 2 == 0 ? 0.5f : 0.22f;
+            points[i] = new Vector2(Mathf.Cos(angle) * radius, Mathf.Sin(angle) * radius);
+        }
+
+        int frontCenter = 0;
+        vertices.Add(new Vector3(0f, -depth * 0.5f, 0f));
+        int backCenter = 1;
+        vertices.Add(new Vector3(0f, depth * 0.5f, 0f));
+        for (int i = 0; i < pointCount; i++)
+        {
+            vertices.Add(new Vector3(points[i].x, -depth * 0.5f, points[i].y));
+            vertices.Add(new Vector3(points[i].x, depth * 0.5f, points[i].y));
+        }
+
+        for (int i = 0; i < pointCount; i++)
+        {
+            int current = 2 + i * 2;
+            int next = 2 + ((i + 1) % pointCount) * 2;
+            triangles.Add(frontCenter); triangles.Add(current); triangles.Add(next);
+            triangles.Add(backCenter); triangles.Add(next + 1); triangles.Add(current + 1);
+            triangles.Add(current); triangles.Add(current + 1); triangles.Add(next);
+            triangles.Add(next); triangles.Add(current + 1); triangles.Add(next + 1);
+        }
+
+        var mesh = new Mesh { name = "Procedural Five Point Star" };
+        mesh.vertices = vertices.ToArray();
+        mesh.triangles = triangles.ToArray();
+        mesh.RecalculateNormals();
+        mesh.RecalculateBounds();
+        return mesh;
     }
 
     // ---------------------------------------------------------------- XR + environment
