@@ -86,6 +86,7 @@ public static class VRRoomBuilder
     {
         BuildRoom();
         if (Object.FindAnyObjectByType<XROrigin>() == null) AddXROrigin();
+        FixPhysicsCollisionsInScene();
         EditorSceneManager.MarkSceneDirty(EditorSceneManager.GetActiveScene());
         AssetDatabase.SaveAssets();
     }
@@ -110,8 +111,73 @@ public static class VRRoomBuilder
             Object.DestroyImmediate(oldTableObjects.gameObject);
 
         BuildShapeSortingGame(table.transform);
+        FixPhysicsCollisionsInScene();
         EditorSceneManager.MarkSceneDirty(EditorSceneManager.GetActiveScene());
         AssetDatabase.SaveAssets();
+    }
+
+    [MenuItem("Tools/VR Room/Fix Physics Collisions")]
+    public static void FixPhysicsCollisions()
+    {
+        FixPhysicsCollisionsInScene();
+        EditorSceneManager.MarkSceneDirty(EditorSceneManager.GetActiveScene());
+        AssetDatabase.SaveAssets();
+    }
+
+    static void FixPhysicsCollisionsInScene()
+    {
+        var origin = Object.FindAnyObjectByType<XROrigin>(FindObjectsInactive.Include);
+        if (origin != null)
+        {
+            var characterController = origin.GetComponentInChildren<CharacterController>(true);
+            if (characterController == null)
+                characterController = origin.gameObject.AddComponent<CharacterController>();
+
+            characterController.enabled = false;
+            characterController.height = 1.7f;
+            characterController.radius = 0.25f;
+            characterController.center = new Vector3(0f, 0.85f, 0f);
+            characterController.skinWidth = 0.02f;
+            characterController.minMoveDistance = 0f;
+            characterController.stepOffset = 0.3f;
+            characterController.slopeLimit = 45f;
+            characterController.detectCollisions = true;
+            characterController.isTrigger = false;
+            characterController.enabled = true;
+        }
+        else
+        {
+            Debug.LogWarning("[VRRoom] No XR Origin was found. Player collision cannot be enabled until an XR Origin is added.");
+        }
+
+        var game = GameObject.Find("Shape Sorting Game");
+        var interactables = game != null
+            ? game.GetComponentsInChildren<XRGrabInteractable>(true)
+            : new XRGrabInteractable[0];
+        int configured = 0;
+        foreach (var interactable in interactables)
+        {
+            var body = interactable.GetComponent<Rigidbody>();
+            if (body == null)
+                continue;
+
+            body.isKinematic = false;
+            body.detectCollisions = true;
+            body.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+            interactable.movementType = XRBaseInteractable.MovementType.VelocityTracking;
+
+            var colliders = interactable.GetComponentsInChildren<Collider>(true);
+            foreach (var collider in colliders)
+            {
+                if (!collider.isTrigger)
+                    collider.enabled = true;
+            }
+
+            configured++;
+        }
+
+        Physics.SyncTransforms();
+        Debug.Log($"[VRRoom] Enabled player collision and configured {configured} grabbable objects for collision-aware movement.");
     }
 
     // ---------------------------------------------------------------- Room
@@ -430,6 +496,7 @@ public static class VRRoomBuilder
         var grab = piece.AddComponent<XRGrabInteractable>();
         grab.throwOnDetach = true;
         grab.trackRotation = true;
+        grab.movementType = XRBaseInteractable.MovementType.VelocityTracking;
         grab.interactionLayers = new InteractionLayerMask { value = (1 << 0) | (1 << (index + 1)) };
     }
 
@@ -644,6 +711,7 @@ public static class VRRoomBuilder
         // Stand ~1 m from the long side of the table, facing it
         origin.transform.position = new Vector3(TablePos.x, 0, TablePos.z - TableD / 2 - 0.9f);
         origin.transform.rotation = Quaternion.identity;
+        FixPhysicsCollisionsInScene();
     }
 
     static void SetupLightingEnvironment()
