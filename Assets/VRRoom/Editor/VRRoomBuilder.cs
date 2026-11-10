@@ -13,8 +13,46 @@ using UnityEngine.XR.Interaction.Toolkit.Locomotion.Teleportation;
 /// <summary>
 /// Builds the VR room and its shape-sorting game. Menu: Tools > VR Room.
 /// </summary>
+[InitializeOnLoad]
 public static class VRRoomBuilder
 {
+    // Make the VR room "the game": Play always starts there, and builds start there.
+    static VRRoomBuilder()
+    {
+        EditorApplication.delayCall += UseVRRoomAsStartScene;
+        EditorApplication.delayCall += OpenVRRoomInsteadOfSample;
+    }
+
+    // If the template's demo scene is open, switch the editor to the VR room.
+    static void OpenVRRoomInsteadOfSample()
+    {
+        if (EditorApplication.isPlayingOrWillChangePlaymode) return;
+        if (EditorSceneManager.GetActiveScene().path != "Assets/Scenes/SampleScene.unity") return;
+        if (!File.Exists(ScenePath)) return;
+        if (!EditorSceneManager.SaveCurrentModifiedScenesIfUserWantsTo()) return;
+        EditorSceneManager.OpenScene(ScenePath, OpenSceneMode.Single);
+    }
+
+    [MenuItem("Tools/VR Room/Use VR Room As Start Scene")]
+    public static void UseVRRoomAsStartScene()
+    {
+        var sceneAsset = AssetDatabase.LoadAssetAtPath<SceneAsset>(ScenePath);
+        if (sceneAsset == null) return;
+
+        // Pressing Play in the editor always starts in the VR room, whatever scene is open.
+        EditorSceneManager.playModeStartScene = sceneAsset;
+
+        // The built game starts with the first scene in Build Settings.
+        var scenes = new List<EditorBuildSettingsScene>(EditorBuildSettings.scenes);
+        int index = scenes.FindIndex(sc => sc.path == ScenePath);
+        if (index == 0 && scenes[0].enabled) return;
+        if (index > 0) scenes.RemoveAt(index);
+        if (index != 0) scenes.Insert(0, new EditorBuildSettingsScene(ScenePath, true));
+        else scenes[0] = new EditorBuildSettingsScene(ScenePath, true);
+        EditorBuildSettings.scenes = scenes.ToArray();
+        Debug.Log("[VRRoom] VR Room is now the start scene.");
+    }
+
     const string MatDir = "Assets/VRRoom/Materials";
     const string ScenePath = "Assets/Scenes/VRRoom.unity";
 
