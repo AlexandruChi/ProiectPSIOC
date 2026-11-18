@@ -8,21 +8,14 @@ using UnityEngine.Rendering;
 using UnityEngine.XR.Interaction.Toolkit;
 using UnityEngine.XR.Interaction.Toolkit.Interactables;
 using UnityEngine.XR.Interaction.Toolkit.Interactors;
+using UnityEngine.XR.Interaction.Toolkit.Locomotion;
 using UnityEngine.XR.Interaction.Toolkit.Locomotion.Teleportation;
 
 /// <summary>
 /// Builds the VR room and its shape-sorting game. Menu: Tools > VR Room.
 /// </summary>
-[InitializeOnLoad]
 public static class VRRoomBuilder
 {
-    // Make the VR room "the game": Play always starts there, and builds start there.
-    static VRRoomBuilder()
-    {
-        EditorApplication.delayCall += UseVRRoomAsStartScene;
-        EditorApplication.delayCall += OpenVRRoomInsteadOfSample;
-    }
-
     // If the template's demo scene is open, switch the editor to the VR room.
     static void OpenVRRoomInsteadOfSample()
     {
@@ -37,9 +30,13 @@ public static class VRRoomBuilder
     public static void UseVRRoomAsStartScene()
     {
         var sceneAsset = AssetDatabase.LoadAssetAtPath<SceneAsset>(ScenePath);
-        if (sceneAsset == null) return;
+        if (sceneAsset == null)
+        {
+            Debug.LogWarning($"[VRRoom] Scene not found at {ScenePath}. Build the room scene first.");
+            return;
+        }
 
-        // Pressing Play in the editor always starts in the VR room, whatever scene is open.
+        // Pressing Play in the editor starts in the VR room, whatever scene is open.
         EditorSceneManager.playModeStartScene = sceneAsset;
 
         // The built game starts with the first scene in Build Settings.
@@ -54,15 +51,21 @@ public static class VRRoomBuilder
     }
 
     const string MatDir = "Assets/VRRoom/Materials";
+    const string MeshDir = "Assets/VRRoom/Meshes";
     const string ScenePath = "Assets/Scenes/VRRoom.unity";
 
     const string XROriginPrefab = "Assets/VRTemplateAssets/Prefabs/Setup/Complete XR Origin Set Up Variant.prefab";
     const string XROriginFallback = "Assets/Samples/XR Interaction Toolkit/3.5.1/Starter Assets/Prefabs/XR Origin (XR Rig).prefab";
+
     // Room dimensions (metres)
     const float RoomW = 6f, RoomD = 6f, RoomH = 3f, WallT = 0.1f;
+
     // Table
     static readonly Vector3 TablePos = new Vector3(0f, 0f, 0.5f);
     const float TableH = 0.75f, TableW = 1.6f, TableD = 0.9f, TopT = 0.05f, LegT = 0.07f;
+
+    // Reserve high interaction layer bits (8..12) so shape sockets never collide with Default (0), Teleport (1), or UI layers.
+    const int FirstShapeInteractionLayerBit = 8;
 
     [MenuItem("Tools/VR Room/Build Room Scene (new scene)")]
     public static void BuildNewScene()
@@ -77,6 +80,7 @@ public static class VRRoomBuilder
         Directory.CreateDirectory(Path.GetDirectoryName(ScenePath));
         EditorSceneManager.SaveScene(scene, ScenePath);
         AddSceneToBuildSettings(ScenePath);
+        UseVRRoomAsStartScene();
         AssetDatabase.SaveAssets();
         Debug.Log($"[VRRoom] Scene created at {ScenePath}. Press Play (or build) to try it in VR.");
     }
@@ -84,6 +88,10 @@ public static class VRRoomBuilder
     [MenuItem("Tools/VR Room/Add Room To Current Scene")]
     public static void AddToCurrentScene()
     {
+        var existingRoom = GameObject.Find("VR Room");
+        if (existingRoom != null)
+            Object.DestroyImmediate(existingRoom);
+
         BuildRoom();
         if (Object.FindAnyObjectByType<XROrigin>() == null) AddXROrigin();
         FixPhysicsCollisionsInScene();
@@ -104,11 +112,6 @@ public static class VRRoomBuilder
         var oldGame = table.transform.Find("Shape Sorting Game");
         if (oldGame != null)
             Object.DestroyImmediate(oldGame.gameObject);
-
-        var room = GameObject.Find("VR Room");
-        var oldTableObjects = room != null ? room.transform.Find("Table Objects") : null;
-        if (oldTableObjects != null)
-            Object.DestroyImmediate(oldTableObjects.gameObject);
 
         BuildShapeSortingGame(table.transform);
         FixPhysicsCollisionsInScene();
@@ -144,6 +147,23 @@ public static class VRRoomBuilder
             characterController.detectCollisions = true;
             characterController.isTrigger = false;
             characterController.enabled = true;
+
+            // Keep the CharacterController aligned with the player's physical HMD position during room-scale movement.
+            var driver = origin.GetComponentInChildren<CharacterControllerDriver>(true);
+            if (driver == null)
+            {
+                var locomotionProvider = origin.GetComponentInChildren<LocomotionProvider>(true);
+                if (locomotionProvider != null)
+                {
+                    driver = locomotionProvider.gameObject.AddComponent<CharacterControllerDriver>();
+                    driver.locomotionProvider = locomotionProvider;
+                }
+            }
+            if (driver != null)
+            {
+                driver.minHeight = 0.5f;
+                driver.maxHeight = 2.2f;
+            }
         }
         else
         {
@@ -184,16 +204,16 @@ public static class VRRoomBuilder
 
     static void BuildRoom()
     {
-        var mFloor    = Mat("Floor_Wood",   new Color(0.42f, 0.28f, 0.18f), 0.35f);
-        var mWall     = Mat("Wall_Paint",   new Color(0.86f, 0.84f, 0.80f), 0.15f);
-        var mCeiling  = Mat("Ceiling",      new Color(0.95f, 0.95f, 0.95f), 0.05f);
-        var mTrim     = Mat("Trim_Dark",    new Color(0.18f, 0.16f, 0.15f), 0.3f);
-        var mTable    = Mat("Table_Oak",    new Color(0.62f, 0.44f, 0.26f), 0.55f);
-        var mLegs     = Mat("Metal_Black",  new Color(0.08f, 0.08f, 0.09f), 0.6f, 0.8f);
-        var mChair    = Mat("Chair_Walnut", new Color(0.33f, 0.21f, 0.13f), 0.45f);
-        var mRug      = Mat("Rug",          new Color(0.22f, 0.32f, 0.45f), 0.0f);
-        var mWindow   = Emissive("Window_Light", new Color(0.75f, 0.88f, 1f), 1.6f);
-        var mLampShade= Emissive("Lamp_Glow",    new Color(1f, 0.9f, 0.7f), 2.5f);
+        var mFloor     = Mat("Floor_Wood",   new Color(0.42f, 0.28f, 0.18f), 0.35f);
+        var mWall      = Mat("Wall_Paint",   new Color(0.86f, 0.84f, 0.80f), 0.15f);
+        var mCeiling   = Mat("Ceiling",      new Color(0.95f, 0.95f, 0.95f), 0.05f);
+        var mTrim      = Mat("Trim_Dark",    new Color(0.18f, 0.16f, 0.15f), 0.3f);
+        var mTable     = Mat("Table_Oak",    new Color(0.62f, 0.44f, 0.26f), 0.55f);
+        var mLegs      = Mat("Metal_Black",  new Color(0.08f, 0.08f, 0.09f), 0.6f, 0.8f);
+        var mChair     = Mat("Chair_Walnut", new Color(0.33f, 0.21f, 0.13f), 0.45f);
+        var mRug       = Mat("Rug",          new Color(0.22f, 0.32f, 0.45f), 0.0f);
+        var mWindow    = Emissive("Window_Light", new Color(0.75f, 0.88f, 1f), 1.6f);
+        var mLampShade = Emissive("Lamp_Glow",    new Color(1f, 0.9f, 0.7f), 2.5f);
 
         var room = new GameObject("VR Room").transform;
 
@@ -345,6 +365,8 @@ public static class VRRoomBuilder
         win.shadows = LightShadows.None;
     }
 
+    // ---------------------------------------------------------------- Shape Sorting Game
+
     const float SortingBoxW = 0.72f;
     const float SortingBoxD = 0.46f;
     const float SortingBoxH = 0.22f;
@@ -393,13 +415,14 @@ public static class VRRoomBuilder
         public Vector3 Position;
     }
 
+    // Well-spaced holes with VR-friendly clearance (~12-15 mm per side relative to each piece).
     static readonly SortingHole[] SortingHoles =
     {
-        new SortingHole(SortingShape.Cube, new Vector2(-0.18f, 0.08f), 0.11f, 0.11f),
-        new SortingHole(SortingShape.Sphere, new Vector2(-0.02f, 0.08f), 0.085f, 0.085f),
-        new SortingHole(SortingShape.Cylinder, new Vector2(0.18f, 0.08f), 0.115f, 0.115f),
-        new SortingHole(SortingShape.Tetrahedron, new Vector2(-0.09f, -0.12f), 0.12f, 0.12f),
-        new SortingHole(SortingShape.Star, new Vector2(0.15f, -0.12f), 0.12f, 0.12f)
+        new SortingHole(SortingShape.Cube,        new Vector2(-0.21f,  0.095f), 0.110f, 0.110f),
+        new SortingHole(SortingShape.Sphere,      new Vector2( 0.00f,  0.095f), 0.118f, 0.118f),
+        new SortingHole(SortingShape.Cylinder,    new Vector2( 0.21f,  0.095f), 0.118f, 0.118f),
+        new SortingHole(SortingShape.Tetrahedron, new Vector2(-0.12f, -0.095f), 0.125f, 0.125f),
+        new SortingHole(SortingShape.Star,        new Vector2( 0.12f, -0.095f), 0.130f, 0.130f)
     };
 
     static void BuildShapeSortingGame(Transform table)
@@ -429,7 +452,9 @@ public static class VRRoomBuilder
         var top = new GameObject("Top With Openings");
         top.transform.SetParent(box, false);
         top.transform.localPosition = new Vector3(0f, SortingBoxH * 0.5f - SortingWallT * 0.5f, 0f);
-        var topMesh = CreateSortingTopMesh(SortingBoxW - SortingWallT, SortingBoxD - SortingWallT, SortingHoles);
+        var topMesh = SaveMeshAsset(
+            CreateSortingTopMesh(SortingBoxW - SortingWallT * 2f, SortingBoxD - SortingWallT * 2f, SortingWallT, SortingHoles),
+            "SortingBoxTop");
         top.AddComponent<MeshFilter>().sharedMesh = topMesh;
         top.AddComponent<MeshRenderer>().sharedMaterial = Mat("SortingBox_Top", new Color(0.82f, 0.92f, 1f), 0.25f);
         var topCollider = top.AddComponent<MeshCollider>();
@@ -438,11 +463,11 @@ public static class VRRoomBuilder
 
         var pieces = new[]
         {
-            new SortingPieceDefinition(SortingShape.Cube, PrimitiveType.Cube, new Color(0.9f, 0.12f, 0.12f), new Vector3(0.1f, 0.1f, 0.1f), new Vector3(-0.55f, 0.08f, -0.27f)),
-            new SortingPieceDefinition(SortingShape.Sphere, PrimitiveType.Sphere, new Color(1f, 0.78f, 0.05f), new Vector3(0.076f, 0.076f, 0.076f), new Vector3(-0.55f, 0.08f, 0f)),
-            new SortingPieceDefinition(SortingShape.Cylinder, PrimitiveType.Cylinder, new Color(0.12f, 0.65f, 0.22f), new Vector3(0.105f, 0.06f, 0.105f), new Vector3(-0.55f, 0.08f, 0.27f)),
-            new SortingPieceDefinition(SortingShape.Tetrahedron, PrimitiveType.Cube, new Color(1f, 0.55f, 0.15f), new Vector3(0.105f, 0.105f, 0.105f), new Vector3(0.55f, 0.08f, -0.14f)),
-            new SortingPieceDefinition(SortingShape.Star, PrimitiveType.Cube, new Color(0.57f, 0.24f, 0.85f), new Vector3(0.11f, 0.055f, 0.11f), new Vector3(0.55f, 0.08f, 0.14f))
+            new SortingPieceDefinition(SortingShape.Cube,        PrimitiveType.Cube,     new Color(0.90f, 0.12f, 0.12f), new Vector3(0.085f, 0.085f, 0.085f), new Vector3(-0.55f, 0.08f, -0.27f)),
+            new SortingPieceDefinition(SortingShape.Sphere,      PrimitiveType.Sphere,   new Color(1.00f, 0.78f, 0.05f), new Vector3(0.095f, 0.095f, 0.095f), new Vector3(-0.55f, 0.08f,  0.00f)),
+            new SortingPieceDefinition(SortingShape.Cylinder,    PrimitiveType.Cylinder, new Color(0.12f, 0.65f, 0.22f), new Vector3(0.092f, 0.055f, 0.092f), new Vector3(-0.55f, 0.08f,  0.27f)),
+            new SortingPieceDefinition(SortingShape.Tetrahedron, PrimitiveType.Cube,     new Color(1.00f, 0.55f, 0.15f), new Vector3(0.095f, 0.095f, 0.095f), new Vector3( 0.55f, 0.08f, -0.14f)),
+            new SortingPieceDefinition(SortingShape.Star,        PrimitiveType.Cube,     new Color(0.57f, 0.24f, 0.85f), new Vector3(0.100f, 0.055f, 0.100f), new Vector3( 0.55f, 0.08f,  0.14f))
         };
 
         for (int i = 0; i < pieces.Length; i++)
@@ -465,7 +490,9 @@ public static class VRRoomBuilder
         if (definition.Shape == SortingShape.Tetrahedron || definition.Shape == SortingShape.Star)
         {
             piece = new GameObject(definition.Shape + " Piece");
-            mesh = definition.Shape == SortingShape.Tetrahedron ? CreateTetrahedronMesh() : CreateStarPrismMesh();
+            mesh = definition.Shape == SortingShape.Tetrahedron
+                ? SaveMeshAsset(CreateTetrahedronMesh(), "SortingTetrahedron")
+                : SaveMeshAsset(CreateStarPrismMesh(), "SortingStar");
             piece.AddComponent<MeshFilter>().sharedMesh = mesh;
             piece.AddComponent<MeshRenderer>().sharedMaterial = Mat("SortingShape_" + definition.Shape,
                 definition.Color, 0.35f);
@@ -484,9 +511,27 @@ public static class VRRoomBuilder
         piece.transform.localPosition = definition.Position;
         piece.transform.localScale = definition.Size;
 
-        var meshCollider = piece.AddComponent<MeshCollider>();
-        meshCollider.sharedMesh = mesh;
-        meshCollider.convex = true;
+        if (definition.Shape == SortingShape.Star)
+        {
+            // A single convex MeshCollider turns a star into a solid pentagon that cannot fit through the star hole.
+            // Build 5 convex wedge colliders (one per star arm) so physics matches the concave silhouette.
+            var armMeshes = CreateStarArmConvexMeshes();
+            for (int arm = 0; arm < armMeshes.Length; arm++)
+            {
+                var armMesh = SaveMeshAsset(armMeshes[arm], $"SortingStarArm_{arm}");
+                var armGo = new GameObject($"StarArmCollider_{arm}");
+                armGo.transform.SetParent(piece.transform, false);
+                var armCollider = armGo.AddComponent<MeshCollider>();
+                armCollider.sharedMesh = armMesh;
+                armCollider.convex = true;
+            }
+        }
+        else
+        {
+            var meshCollider = piece.AddComponent<MeshCollider>();
+            meshCollider.sharedMesh = mesh;
+            meshCollider.convex = true;
+        }
 
         var body = piece.AddComponent<Rigidbody>();
         body.mass = 0.3f;
@@ -497,38 +542,58 @@ public static class VRRoomBuilder
         grab.throwOnDetach = true;
         grab.trackRotation = true;
         grab.movementType = XRBaseInteractable.MovementType.VelocityTracking;
-        grab.interactionLayers = new InteractionLayerMask { value = (1 << 0) | (1 << (index + 1)) };
+        int shapeBit = 1 << GetShapeInteractionLayerIndex(index);
+        grab.interactionLayers = new InteractionLayerMask { value = (1 << 0) | shapeBit };
+    }
+
+    static int GetShapeInteractionLayerIndex(int shapeIndex)
+    {
+        int teleportLayer = InteractionLayerMask.NameToLayer("Teleport");
+        int bit = FirstShapeInteractionLayerBit + shapeIndex;
+        if (bit == teleportLayer)
+            bit += 8;
+        return bit;
     }
 
     static void CreateSortingSocket(Transform box, SortingHole hole, int index)
     {
+        // Place the socket strictly inside the box below the lid so pieces must physically pass
+        // through the matching hole first, then settle onto the inner floor directly below it.
+        float innerFloorY = -SortingBoxH * 0.5f + SortingWallT;
+        float lidBottomY = SortingBoxH * 0.5f - SortingWallT;
+        float socketCenterY = Mathf.Lerp(innerFloorY, lidBottomY, 0.38f);
+        float maxRadiusWithoutProtrudingAboveLid = (lidBottomY - socketCenterY) * 0.85f;
+
         var socketObject = new GameObject(hole.Shape + " Opening Socket");
         socketObject.transform.SetParent(box, false);
-        socketObject.transform.localPosition = new Vector3(hole.Center.x, SortingBoxH * 0.5f, hole.Center.y);
+        socketObject.transform.localPosition = new Vector3(hole.Center.x, socketCenterY, hole.Center.y);
 
         var trigger = socketObject.AddComponent<SphereCollider>();
         trigger.isTrigger = true;
-        trigger.radius = Mathf.Max(hole.Width, hole.Height) * 0.55f;
+        trigger.radius = Mathf.Min(Mathf.Max(hole.Width, hole.Height) * 0.5f, maxRadiusWithoutProtrudingAboveLid);
 
         var attach = new GameObject("Attach");
         attach.transform.SetParent(socketObject.transform, false);
-        attach.transform.localPosition = Vector3.down * (SortingBoxH * 0.45f);
+        attach.transform.localPosition = new Vector3(0f, (innerFloorY + 0.03f) - socketCenterY, 0f);
 
         var socket = socketObject.AddComponent<XRSocketInteractor>();
         socket.attachTransform = attach.transform;
-        socket.interactionLayers = new InteractionLayerMask { value = 1 << (index + 1) };
+        socket.recycleDelayTime = 0.35f;
+        socket.interactionLayers = new InteractionLayerMask { value = 1 << GetShapeInteractionLayerIndex(index) };
     }
 
-    static Mesh CreateSortingTopMesh(float width, float depth, SortingHole[] holes)
+    static Mesh CreateSortingTopMesh(float width, float depth, float thickness, SortingHole[] holes)
     {
-        const float cellSize = 0.003f;
+        // 7 mm grid gives ~18k watertight triangles (top, bottom, and inner hole walls) — Quest-friendly.
+        const float cellSize = 0.007f;
         int xCells = Mathf.CeilToInt(width / cellSize);
         int zCells = Mathf.CeilToInt(depth / cellSize);
-        var vertices = new Vector3[(xCells + 1) * (zCells + 1)];
+        var vertices = new List<Vector3>((xCells + 1) * (zCells + 1) * 2);
         var triangles = new List<int>();
         var holePolygons = new Vector2[holes.Length][];
         float halfWidth = width * 0.5f;
         float halfDepth = depth * 0.5f;
+        float halfThick = thickness * 0.5f;
 
         for (int i = 0; i < holes.Length; i++)
         {
@@ -536,16 +601,30 @@ public static class VRRoomBuilder
                 holePolygons[i] = CreateHolePolygon(holes[i]);
         }
 
+        int stride = xCells + 1;
+        int topBase = 0;
         for (int z = 0; z <= zCells; z++)
         {
             float localZ = Mathf.Lerp(-halfDepth, halfDepth, z / (float)zCells);
             for (int x = 0; x <= xCells; x++)
             {
                 float localX = Mathf.Lerp(-halfWidth, halfWidth, x / (float)xCells);
-                vertices[z * (xCells + 1) + x] = new Vector3(localX, 0f, localZ);
+                vertices.Add(new Vector3(localX, halfThick, localZ));
             }
         }
 
+        int botBase = vertices.Count;
+        for (int z = 0; z <= zCells; z++)
+        {
+            float localZ = Mathf.Lerp(-halfDepth, halfDepth, z / (float)zCells);
+            for (int x = 0; x <= xCells; x++)
+            {
+                float localX = Mathf.Lerp(-halfWidth, halfWidth, x / (float)xCells);
+                vertices.Add(new Vector3(localX, -halfThick, localZ));
+            }
+        }
+
+        var solid = new bool[xCells, zCells];
         for (int z = 0; z < zCells; z++)
         {
             for (int x = 0; x < xCells; x++)
@@ -553,21 +632,57 @@ public static class VRRoomBuilder
                 var center = new Vector2(
                     Mathf.Lerp(-halfWidth, halfWidth, (x + 0.5f) / xCells),
                     Mathf.Lerp(-halfDepth, halfDepth, (z + 0.5f) / zCells));
-                if (IsInsideSortingHole(center, holes, holePolygons))
+                solid[x, z] = !IsInsideSortingHole(center, holes, holePolygons);
+            }
+        }
+
+        for (int z = 0; z < zCells; z++)
+        {
+            for (int x = 0; x < xCells; x++)
+            {
+                if (!solid[x, z])
                     continue;
 
-                int a = z * (xCells + 1) + x;
+                int a = z * stride + x;
                 int b = a + 1;
-                int c = a + xCells + 1;
+                int c = a + stride;
                 int d = c + 1;
-                triangles.Add(a); triangles.Add(d); triangles.Add(b);
-                triangles.Add(a); triangles.Add(c); triangles.Add(d);
+
+                // Top face (+Y)
+                triangles.Add(topBase + a); triangles.Add(topBase + d); triangles.Add(topBase + b);
+                triangles.Add(topBase + a); triangles.Add(topBase + c); triangles.Add(topBase + d);
+
+                // Bottom face (-Y)
+                triangles.Add(botBase + a); triangles.Add(botBase + b); triangles.Add(botBase + d);
+                triangles.Add(botBase + a); triangles.Add(botBase + d); triangles.Add(botBase + c);
+
+                // Side walls on hole boundaries and outer perimeter
+                if (z == 0 || !solid[x, z - 1])
+                {
+                    triangles.Add(botBase + a); triangles.Add(topBase + a); triangles.Add(topBase + b);
+                    triangles.Add(botBase + a); triangles.Add(topBase + b); triangles.Add(botBase + b);
+                }
+                if (z == zCells - 1 || !solid[x, z + 1])
+                {
+                    triangles.Add(botBase + d); triangles.Add(topBase + d); triangles.Add(topBase + c);
+                    triangles.Add(botBase + d); triangles.Add(topBase + c); triangles.Add(botBase + c);
+                }
+                if (x == 0 || !solid[x - 1, z])
+                {
+                    triangles.Add(botBase + c); triangles.Add(topBase + c); triangles.Add(topBase + a);
+                    triangles.Add(botBase + c); triangles.Add(topBase + a); triangles.Add(botBase + a);
+                }
+                if (x == xCells - 1 || !solid[x + 1, z])
+                {
+                    triangles.Add(botBase + b); triangles.Add(topBase + b); triangles.Add(topBase + d);
+                    triangles.Add(botBase + b); triangles.Add(topBase + d); triangles.Add(botBase + d);
+                }
             }
         }
 
         var mesh = new Mesh { name = "Sorting Box Top With Five Openings" };
         mesh.indexFormat = IndexFormat.UInt32;
-        mesh.vertices = vertices;
+        mesh.vertices = vertices.ToArray();
         mesh.triangles = triangles.ToArray();
         mesh.RecalculateNormals();
         mesh.RecalculateBounds();
@@ -696,6 +811,65 @@ public static class VRRoomBuilder
         return mesh;
     }
 
+    static Mesh[] CreateStarArmConvexMeshes()
+    {
+        const int pointCount = 10;
+        const float depth = 0.5f;
+        var points = new Vector2[pointCount];
+        for (int i = 0; i < pointCount; i++)
+        {
+            float angle = -Mathf.PI * 0.5f + i * Mathf.PI / 5f;
+            float radius = i % 2 == 0 ? 0.5f : 0.22f;
+            points[i] = new Vector2(Mathf.Cos(angle) * radius, Mathf.Sin(angle) * radius);
+        }
+
+        var meshes = new Mesh[5];
+        for (int arm = 0; arm < 5; arm++)
+        {
+            int tipIdx = arm * 2;
+            int prevValleyIdx = (tipIdx + pointCount - 1) % pointCount;
+            int nextValleyIdx = (tipIdx + 1) % pointCount;
+
+            var quad = new[]
+            {
+                Vector2.zero,
+                points[prevValleyIdx],
+                points[tipIdx],
+                points[nextValleyIdx]
+            };
+
+            float halfD = depth * 0.5f;
+            var verts = new Vector3[8];
+            for (int i = 0; i < 4; i++)
+            {
+                verts[i] = new Vector3(quad[i].x, -halfD, quad[i].y);
+                verts[i + 4] = new Vector3(quad[i].x, halfD, quad[i].y);
+            }
+
+            var tris = new[]
+            {
+                // Bottom (-Y)
+                0, 1, 2, 0, 2, 3,
+                // Top (+Y)
+                4, 6, 5, 4, 7, 6,
+                // Sides
+                0, 4, 5, 0, 5, 1,
+                1, 5, 6, 1, 6, 2,
+                2, 6, 7, 2, 7, 3,
+                3, 7, 4, 3, 4, 0
+            };
+
+            var m = new Mesh { name = $"Procedural Star Arm {arm}" };
+            m.vertices = verts;
+            m.triangles = tris;
+            m.RecalculateNormals();
+            m.RecalculateBounds();
+            meshes[arm] = m;
+        }
+
+        return meshes;
+    }
+
     // ---------------------------------------------------------------- XR + environment
 
     static void AddXROrigin()
@@ -708,7 +882,7 @@ public static class VRRoomBuilder
             return;
         }
         var origin = (GameObject)PrefabUtility.InstantiatePrefab(prefab);
-        // Stand ~1 m from the long side of the table, facing it
+        // Stand ~0.9 m from the long side of the table, facing it
         origin.transform.position = new Vector3(TablePos.x, 0, TablePos.z - TableD / 2 - 0.9f);
         origin.transform.rotation = Quaternion.identity;
         FixPhysicsCollisionsInScene();
@@ -801,5 +975,24 @@ public static class VRRoomBuilder
         m.globalIlluminationFlags = MaterialGlobalIlluminationFlags.RealtimeEmissive;
         EditorUtility.SetDirty(m);
         return m;
+    }
+
+    static Mesh SaveMeshAsset(Mesh mesh, string assetName)
+    {
+        Directory.CreateDirectory(MeshDir);
+        string path = $"{MeshDir}/{assetName}.asset";
+        var existing = AssetDatabase.LoadAssetAtPath<Mesh>(path);
+        if (existing != null)
+        {
+            existing.Clear();
+            EditorUtility.CopySerialized(mesh, existing);
+            Object.DestroyImmediate(mesh);
+            EditorUtility.SetDirty(existing);
+            return existing;
+        }
+
+        AssetDatabase.CreateAsset(mesh, path);
+        EditorUtility.SetDirty(mesh);
+        return mesh;
     }
 }
