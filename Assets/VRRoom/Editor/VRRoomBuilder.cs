@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 using Unity.XR.CoreUtils;
@@ -14,16 +15,42 @@ using UnityEngine.XR.Interaction.Toolkit.Locomotion.Teleportation;
 /// <summary>
 /// Builds the VR room and its shape-sorting game. Menu: Tools > VR Room.
 /// </summary>
+[InitializeOnLoad]
 public static class VRRoomBuilder
 {
-    // If the template's demo scene is open, switch the editor to the VR room.
-    static void OpenVRRoomInsteadOfSample()
+    const string MatDir = "Assets/VRRoom/Materials";
+    const string MeshDir = "Assets/VRRoom/Meshes";
+    const string ScriptDir = "Assets/VRRoom/Scripts";
+    const string ScenePath = "Assets/Scenes/VRRoom.unity";
+    const string PendingSetupPrefKey = "VRRoom_PendingRuntimeSetup";
+
+    const string XROriginPrefab = "Assets/VRTemplateAssets/Prefabs/Setup/Complete XR Origin Set Up Variant.prefab";
+    const string XROriginFallback = "Assets/Samples/XR Interaction Toolkit/3.5.1/Starter Assets/Prefabs/XR Origin (XR Rig).prefab";
+
+    // Room dimensions (metres) — thick outer walls prevent physics/locomotion tunneling while keeping 6x6x3m interior.
+    const float RoomW = 6f, RoomD = 6f, RoomH = 3f, WallT = 0.5f;
+
+    // Table
+    static readonly Vector3 TablePos = new Vector3(0f, 0f, 0.5f);
+    const float TableH = 0.75f, TableW = 1.6f, TableD = 0.9f, TopT = 0.05f, LegT = 0.07f;
+
+    static VRRoomBuilder()
     {
-        if (EditorApplication.isPlayingOrWillChangePlaymode) return;
-        if (EditorSceneManager.GetActiveScene().path != "Assets/Scenes/SampleScene.unity") return;
-        if (!File.Exists(ScenePath)) return;
-        if (!EditorSceneManager.SaveCurrentModifiedScenesIfUserWantsTo()) return;
-        EditorSceneManager.OpenScene(ScenePath, OpenSceneMode.Single);
+        EditorApplication.delayCall += CompletePendingRuntimeSetupAfterCompile;
+    }
+
+    static void CompletePendingRuntimeSetupAfterCompile()
+    {
+        if (!EditorPrefs.GetBool(PendingSetupPrefKey, false))
+            return;
+        if (EditorApplication.isCompiling || EditorApplication.isPlayingOrWillChangePlaymode)
+            return;
+
+        EditorPrefs.DeleteKey(PendingSetupPrefKey);
+        AttachRuntimeGuardsInScene();
+        EditorSceneManager.MarkSceneDirty(EditorSceneManager.GetActiveScene());
+        AssetDatabase.SaveAssets();
+        Debug.Log("[VRRoom] Attached runtime collision and grab-drop guards after script compilation.");
     }
 
     [MenuItem("Tools/VR Room/Use VR Room As Start Scene")]
@@ -36,10 +63,8 @@ public static class VRRoomBuilder
             return;
         }
 
-        // Pressing Play in the editor starts in the VR room, whatever scene is open.
         EditorSceneManager.playModeStartScene = sceneAsset;
 
-        // The built game starts with the first scene in Build Settings.
         var scenes = new List<EditorBuildSettingsScene>(EditorBuildSettings.scenes);
         int index = scenes.FindIndex(sc => sc.path == ScenePath);
         if (index == 0 && scenes[0].enabled) return;
@@ -50,32 +75,18 @@ public static class VRRoomBuilder
         Debug.Log("[VRRoom] VR Room is now the start scene.");
     }
 
-    const string MatDir = "Assets/VRRoom/Materials";
-    const string MeshDir = "Assets/VRRoom/Meshes";
-    const string ScenePath = "Assets/Scenes/VRRoom.unity";
-
-    const string XROriginPrefab = "Assets/VRTemplateAssets/Prefabs/Setup/Complete XR Origin Set Up Variant.prefab";
-    const string XROriginFallback = "Assets/Samples/XR Interaction Toolkit/3.5.1/Starter Assets/Prefabs/XR Origin (XR Rig).prefab";
-
-    // Room dimensions (metres)
-    const float RoomW = 6f, RoomD = 6f, RoomH = 3f, WallT = 0.1f;
-
-    // Table
-    static readonly Vector3 TablePos = new Vector3(0f, 0f, 0.5f);
-    const float TableH = 0.75f, TableW = 1.6f, TableD = 0.9f, TopT = 0.05f, LegT = 0.07f;
-
-    // Reserve high interaction layer bits (8..12) so shape sockets never collide with Default (0), Teleport (1), or UI layers.
-    const int FirstShapeInteractionLayerBit = 8;
-
     [MenuItem("Tools/VR Room/Build Room Scene (new scene)")]
     public static void BuildNewScene()
     {
         if (!EditorSceneManager.SaveCurrentModifiedScenesIfUserWantsTo()) return;
 
+        EnsureRuntimeScriptsExist();
+
         var scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
         BuildRoom();
         AddXROrigin();
         SetupLightingEnvironment();
+        FixPhysicsCollisionsInScene();
 
         Directory.CreateDirectory(Path.GetDirectoryName(ScenePath));
         EditorSceneManager.SaveScene(scene, ScenePath);
@@ -88,12 +99,14 @@ public static class VRRoomBuilder
     [MenuItem("Tools/VR Room/Add Room To Current Scene")]
     public static void AddToCurrentScene()
     {
+        EnsureRuntimeScriptsExist();
+
         var existingRoom = GameObject.Find("VR Room");
         if (existingRoom != null)
-            Object.DestroyImmediate(existingRoom);
+            UnityEngine.Object.DestroyImmediate(existingRoom);
 
         BuildRoom();
-        if (Object.FindAnyObjectByType<XROrigin>() == null) AddXROrigin();
+        if (UnityEngine.Object.FindAnyObjectByType<XROrigin>() == null) AddXROrigin();
         FixPhysicsCollisionsInScene();
         EditorSceneManager.MarkSceneDirty(EditorSceneManager.GetActiveScene());
         AssetDatabase.SaveAssets();
@@ -102,6 +115,8 @@ public static class VRRoomBuilder
     [MenuItem("Tools/VR Room/Build Shape Sorting Game On Existing Table")]
     public static void BuildShapeSortingGameOnExistingTable()
     {
+        EnsureRuntimeScriptsExist();
+
         var table = GameObject.Find("Table");
         if (table == null)
         {
@@ -111,7 +126,7 @@ public static class VRRoomBuilder
 
         var oldGame = table.transform.Find("Shape Sorting Game");
         if (oldGame != null)
-            Object.DestroyImmediate(oldGame.gameObject);
+            UnityEngine.Object.DestroyImmediate(oldGame.gameObject);
 
         BuildShapeSortingGame(table.transform);
         FixPhysicsCollisionsInScene();
@@ -122,6 +137,7 @@ public static class VRRoomBuilder
     [MenuItem("Tools/VR Room/Fix Physics Collisions")]
     public static void FixPhysicsCollisions()
     {
+        EnsureRuntimeScriptsExist();
         FixPhysicsCollisionsInScene();
         EditorSceneManager.MarkSceneDirty(EditorSceneManager.GetActiveScene());
         AssetDatabase.SaveAssets();
@@ -129,7 +145,15 @@ public static class VRRoomBuilder
 
     static void FixPhysicsCollisionsInScene()
     {
-        var origin = Object.FindAnyObjectByType<XROrigin>(FindObjectsInactive.Include);
+        // Remove any legacy XRSocketInteractor objects (eliminates the blue hover ghost inside the box).
+        var legacySockets = UnityEngine.Object.FindObjectsByType<XRSocketInteractor>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+        for (int i = legacySockets.Length - 1; i >= 0; i--)
+        {
+            if (legacySockets[i] != null)
+                UnityEngine.Object.DestroyImmediate(legacySockets[i].gameObject);
+        }
+
+        var origin = UnityEngine.Object.FindAnyObjectByType<XROrigin>(FindObjectsInactive.Include);
         if (origin != null)
         {
             var characterController = origin.GetComponentInChildren<CharacterController>(true);
@@ -148,7 +172,6 @@ public static class VRRoomBuilder
             characterController.isTrigger = false;
             characterController.enabled = true;
 
-            // Keep the CharacterController aligned with the player's physical HMD position during room-scale movement.
             var driver = origin.GetComponentInChildren<CharacterControllerDriver>(true);
             if (driver == null)
             {
@@ -173,7 +196,7 @@ public static class VRRoomBuilder
         var game = GameObject.Find("Shape Sorting Game");
         var interactables = game != null
             ? game.GetComponentsInChildren<XRGrabInteractable>(true)
-            : new XRGrabInteractable[0];
+            : Array.Empty<XRGrabInteractable>();
         int configured = 0;
         foreach (var interactable in interactables)
         {
@@ -184,7 +207,14 @@ public static class VRRoomBuilder
             body.isKinematic = false;
             body.detectCollisions = true;
             body.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+            body.maxDepenetrationVelocity = 1.5f;
+
             interactable.movementType = XRBaseInteractable.MovementType.VelocityTracking;
+            interactable.velocityScale = 0.85f;
+            interactable.velocityDamping = 1f;
+            interactable.angularVelocityScale = 0.85f;
+            interactable.angularVelocityDamping = 1f;
+            interactable.throwOnDetach = true;
 
             var colliders = interactable.GetComponentsInChildren<Collider>(true);
             foreach (var collider in colliders)
@@ -196,8 +226,36 @@ public static class VRRoomBuilder
             configured++;
         }
 
+        AttachRuntimeGuardsInScene();
         Physics.SyncTransforms();
-        Debug.Log($"[VRRoom] Enabled player collision and configured {configured} grabbable objects for collision-aware movement.");
+        Debug.Log($"[VRRoom] Configured room wall collisions and {configured} grabbable pieces with physical collision blocking.");
+    }
+
+    static void AttachRuntimeGuardsInScene()
+    {
+        var wallGuardType = Type.GetType("VRPlayerWallCollisionGuard, Assembly-CSharp");
+        var grabDropperType = Type.GetType("VRGrabDistanceDropper, Assembly-CSharp");
+
+        if (wallGuardType == null || grabDropperType == null)
+        {
+            EditorPrefs.SetBool(PendingSetupPrefKey, true);
+            return;
+        }
+
+        var origin = UnityEngine.Object.FindAnyObjectByType<XROrigin>(FindObjectsInactive.Include);
+        if (origin != null && origin.GetComponent(wallGuardType) == null)
+            origin.gameObject.AddComponent(wallGuardType);
+
+        var game = GameObject.Find("Shape Sorting Game");
+        if (game != null)
+        {
+            var interactables = game.GetComponentsInChildren<XRGrabInteractable>(true);
+            foreach (var interactable in interactables)
+            {
+                if (interactable.GetComponent(grabDropperType) == null)
+                    interactable.gameObject.AddComponent(grabDropperType);
+            }
+        }
     }
 
     // ---------------------------------------------------------------- Room
@@ -221,14 +279,21 @@ public static class VRRoomBuilder
         var shell = new GameObject("Shell").transform;
         shell.SetParent(room, false);
 
-        var floor = Box("Floor", shell, new Vector3(0, -WallT / 2, 0), new Vector3(RoomW, WallT, RoomD), mFloor);
-        MakeTeleportable(floor);
+        Box("Floor", shell, new Vector3(0, -WallT / 2, 0), new Vector3(RoomW + 2 * WallT, WallT, RoomD + 2 * WallT), mFloor);
+
+        // Inset teleport surface so teleportation never places the player inside a wall.
+        var teleportPad = new GameObject("Floor_TeleportArea");
+        teleportPad.transform.SetParent(shell, false);
+        teleportPad.transform.localPosition = new Vector3(0f, -0.005f, 0f);
+        var tpCol = teleportPad.AddComponent<BoxCollider>();
+        tpCol.size = new Vector3(RoomW - 0.7f, 0.01f, RoomD - 0.7f);
+        MakeTeleportable(teleportPad);
 
         Box("Ceiling", shell, new Vector3(0, RoomH + WallT / 2, 0), new Vector3(RoomW + 2 * WallT, WallT, RoomD + 2 * WallT), mCeiling);
-        Box("Wall_North", shell, new Vector3(0, RoomH / 2,  RoomD / 2 + WallT / 2), new Vector3(RoomW + 2 * WallT, RoomH, WallT), mWall);
-        Box("Wall_South", shell, new Vector3(0, RoomH / 2, -RoomD / 2 - WallT / 2), new Vector3(RoomW + 2 * WallT, RoomH, WallT), mWall);
-        Box("Wall_East",  shell, new Vector3( RoomW / 2 + WallT / 2, RoomH / 2, 0), new Vector3(WallT, RoomH, RoomD), mWall);
-        Box("Wall_West",  shell, new Vector3(-RoomW / 2 - WallT / 2, RoomH / 2, 0), new Vector3(WallT, RoomH, RoomD), mWall);
+        Box("Wall_North", shell, new Vector3(0, RoomH / 2,  RoomD / 2 + WallT / 2), new Vector3(RoomW + 2 * WallT, RoomH + WallT, WallT), mWall);
+        Box("Wall_South", shell, new Vector3(0, RoomH / 2, -RoomD / 2 - WallT / 2), new Vector3(RoomW + 2 * WallT, RoomH + WallT, WallT), mWall);
+        Box("Wall_East",  shell, new Vector3( RoomW / 2 + WallT / 2, RoomH / 2, 0), new Vector3(WallT, RoomH + WallT, RoomD + 2 * WallT), mWall);
+        Box("Wall_West",  shell, new Vector3(-RoomW / 2 - WallT / 2, RoomH / 2, 0), new Vector3(WallT, RoomH + WallT, RoomD + 2 * WallT), mWall);
 
         // Baseboards (visual only)
         const float bbH = 0.1f, bbT = 0.02f;
@@ -321,8 +386,8 @@ public static class VRRoomBuilder
         cord.transform.SetParent(lamp, false);
         float cordLen = RoomH - shadeY;
         cord.transform.localPosition = new Vector3(0, shadeY + cordLen / 2, 0);
-        cord.transform.localScale = new Vector3(0.01f, cordLen / 2, 0.01f); // cylinder is 2 units tall
-        Object.DestroyImmediate(cord.GetComponent<Collider>());
+        cord.transform.localScale = new Vector3(0.01f, cordLen / 2, 0.01f);
+        UnityEngine.Object.DestroyImmediate(cord.GetComponent<Collider>());
         cord.GetComponent<Renderer>().sharedMaterial = cordMat;
 
         var bulb = GameObject.CreatePrimitive(PrimitiveType.Sphere);
@@ -330,7 +395,7 @@ public static class VRRoomBuilder
         bulb.transform.SetParent(lamp, false);
         bulb.transform.localPosition = new Vector3(0, shadeY, 0);
         bulb.transform.localScale = new Vector3(0.3f, 0.22f, 0.3f);
-        Object.DestroyImmediate(bulb.GetComponent<Collider>());
+        UnityEngine.Object.DestroyImmediate(bulb.GetComponent<Collider>());
         var bulbR = bulb.GetComponent<Renderer>();
         bulbR.sharedMaterial = glowMat;
         bulbR.shadowCastingMode = ShadowCastingMode.Off;
@@ -370,7 +435,7 @@ public static class VRRoomBuilder
     const float SortingBoxW = 0.72f;
     const float SortingBoxD = 0.46f;
     const float SortingBoxH = 0.22f;
-    const float SortingWallT = 0.02f;
+    const float SortingWallT = 0.032f;
 
     enum SortingShape
     {
@@ -415,14 +480,14 @@ public static class VRRoomBuilder
         public Vector3 Position;
     }
 
-    // Well-spaced holes with VR-friendly clearance (~12-15 mm per side relative to each piece).
+    // Hole dimensions sized so each piece only passes through its matching cutout and drops physically inside.
     static readonly SortingHole[] SortingHoles =
     {
-        new SortingHole(SortingShape.Cube,        new Vector2(-0.21f,  0.095f), 0.110f, 0.110f),
-        new SortingHole(SortingShape.Sphere,      new Vector2( 0.00f,  0.095f), 0.118f, 0.118f),
-        new SortingHole(SortingShape.Cylinder,    new Vector2( 0.21f,  0.095f), 0.118f, 0.118f),
-        new SortingHole(SortingShape.Tetrahedron, new Vector2(-0.12f, -0.095f), 0.125f, 0.125f),
-        new SortingHole(SortingShape.Star,        new Vector2( 0.12f, -0.095f), 0.130f, 0.130f)
+        new SortingHole(SortingShape.Cube,        new Vector2(-0.20f,  0.092f), 0.098f, 0.098f),
+        new SortingHole(SortingShape.Sphere,      new Vector2( 0.00f,  0.092f), 0.098f, 0.098f),
+        new SortingHole(SortingShape.Cylinder,    new Vector2( 0.20f,  0.092f), 0.120f, 0.120f),
+        new SortingHole(SortingShape.Tetrahedron, new Vector2(-0.12f, -0.092f), 0.125f, 0.125f),
+        new SortingHole(SortingShape.Star,        new Vector2( 0.12f, -0.092f), 0.132f, 0.132f)
     };
 
     static void BuildShapeSortingGame(Transform table)
@@ -463,18 +528,15 @@ public static class VRRoomBuilder
 
         var pieces = new[]
         {
-            new SortingPieceDefinition(SortingShape.Cube,        PrimitiveType.Cube,     new Color(0.90f, 0.12f, 0.12f), new Vector3(0.085f, 0.085f, 0.085f), new Vector3(-0.55f, 0.08f, -0.27f)),
-            new SortingPieceDefinition(SortingShape.Sphere,      PrimitiveType.Sphere,   new Color(1.00f, 0.78f, 0.05f), new Vector3(0.095f, 0.095f, 0.095f), new Vector3(-0.55f, 0.08f,  0.00f)),
-            new SortingPieceDefinition(SortingShape.Cylinder,    PrimitiveType.Cylinder, new Color(0.12f, 0.65f, 0.22f), new Vector3(0.092f, 0.055f, 0.092f), new Vector3(-0.55f, 0.08f,  0.27f)),
-            new SortingPieceDefinition(SortingShape.Tetrahedron, PrimitiveType.Cube,     new Color(1.00f, 0.55f, 0.15f), new Vector3(0.095f, 0.095f, 0.095f), new Vector3( 0.55f, 0.08f, -0.14f)),
-            new SortingPieceDefinition(SortingShape.Star,        PrimitiveType.Cube,     new Color(0.57f, 0.24f, 0.85f), new Vector3(0.100f, 0.055f, 0.100f), new Vector3( 0.55f, 0.08f,  0.14f))
+            new SortingPieceDefinition(SortingShape.Cube,        PrimitiveType.Cube,     new Color(0.90f, 0.12f, 0.12f), new Vector3(0.082f, 0.082f, 0.082f), new Vector3(-0.55f, 0.08f, -0.27f)),
+            new SortingPieceDefinition(SortingShape.Sphere,      PrimitiveType.Sphere,   new Color(1.00f, 0.78f, 0.05f), new Vector3(0.084f, 0.084f, 0.084f), new Vector3(-0.55f, 0.08f,  0.00f)),
+            new SortingPieceDefinition(SortingShape.Cylinder,    PrimitiveType.Cylinder, new Color(0.12f, 0.65f, 0.22f), new Vector3(0.104f, 0.055f, 0.104f), new Vector3(-0.55f, 0.08f,  0.27f)),
+            new SortingPieceDefinition(SortingShape.Tetrahedron, PrimitiveType.Cube,     new Color(1.00f, 0.55f, 0.15f), new Vector3(0.105f, 0.105f, 0.105f), new Vector3( 0.55f, 0.08f, -0.14f)),
+            new SortingPieceDefinition(SortingShape.Star,        PrimitiveType.Cube,     new Color(0.57f, 0.24f, 0.85f), new Vector3(0.110f, 0.055f, 0.110f), new Vector3( 0.55f, 0.08f,  0.14f))
         };
 
         for (int i = 0; i < pieces.Length; i++)
-            CreateSortingPiece(root, pieces[i], i);
-
-        for (int i = 0; i < SortingHoles.Length; i++)
-            CreateSortingSocket(box, SortingHoles[i], i);
+            CreateSortingPiece(root, pieces[i]);
     }
 
     static float GetTableTopLocalY(Transform table)
@@ -483,7 +545,7 @@ public static class VRRoomBuilder
         return top != null ? top.localPosition.y + top.localScale.y * 0.5f : TableH;
     }
 
-    static void CreateSortingPiece(Transform parent, SortingPieceDefinition definition, int index)
+    static void CreateSortingPiece(Transform parent, SortingPieceDefinition definition)
     {
         GameObject piece;
         Mesh mesh;
@@ -502,7 +564,7 @@ public static class VRRoomBuilder
             piece = GameObject.CreatePrimitive(definition.Primitive);
             piece.name = definition.Shape + " Piece";
             mesh = piece.GetComponent<MeshFilter>().sharedMesh;
-            Object.DestroyImmediate(piece.GetComponent<Collider>());
+            UnityEngine.Object.DestroyImmediate(piece.GetComponent<Collider>());
             piece.GetComponent<Renderer>().sharedMaterial = Mat("SortingShape_" + definition.Shape,
                 definition.Color, 0.35f);
         }
@@ -513,8 +575,6 @@ public static class VRRoomBuilder
 
         if (definition.Shape == SortingShape.Star)
         {
-            // A single convex MeshCollider turns a star into a solid pentagon that cannot fit through the star hole.
-            // Build 5 convex wedge colliders (one per star arm) so physics matches the concave silhouette.
             var armMeshes = CreateStarArmConvexMeshes();
             for (int arm = 0; arm < armMeshes.Length; arm++)
             {
@@ -537,54 +597,27 @@ public static class VRRoomBuilder
         body.mass = 0.3f;
         body.interpolation = RigidbodyInterpolation.Interpolate;
         body.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+        body.maxDepenetrationVelocity = 1.5f;
 
         var grab = piece.AddComponent<XRGrabInteractable>();
         grab.throwOnDetach = true;
         grab.trackRotation = true;
         grab.movementType = XRBaseInteractable.MovementType.VelocityTracking;
-        int shapeBit = 1 << GetShapeInteractionLayerIndex(index);
-        grab.interactionLayers = new InteractionLayerMask { value = (1 << 0) | shapeBit };
-    }
+        grab.velocityScale = 0.85f;
+        grab.velocityDamping = 1f;
+        grab.angularVelocityScale = 0.85f;
+        grab.angularVelocityDamping = 1f;
+        grab.interactionLayers = new InteractionLayerMask { value = 1 << 0 };
 
-    static int GetShapeInteractionLayerIndex(int shapeIndex)
-    {
-        int teleportLayer = InteractionLayerMask.NameToLayer("Teleport");
-        int bit = FirstShapeInteractionLayerBit + shapeIndex;
-        if (bit == teleportLayer)
-            bit += 8;
-        return bit;
-    }
-
-    static void CreateSortingSocket(Transform box, SortingHole hole, int index)
-    {
-        // Place the socket strictly inside the box below the lid so pieces must physically pass
-        // through the matching hole first, then settle onto the inner floor directly below it.
-        float innerFloorY = -SortingBoxH * 0.5f + SortingWallT;
-        float lidBottomY = SortingBoxH * 0.5f - SortingWallT;
-        float socketCenterY = Mathf.Lerp(innerFloorY, lidBottomY, 0.38f);
-        float maxRadiusWithoutProtrudingAboveLid = (lidBottomY - socketCenterY) * 0.85f;
-
-        var socketObject = new GameObject(hole.Shape + " Opening Socket");
-        socketObject.transform.SetParent(box, false);
-        socketObject.transform.localPosition = new Vector3(hole.Center.x, socketCenterY, hole.Center.y);
-
-        var trigger = socketObject.AddComponent<SphereCollider>();
-        trigger.isTrigger = true;
-        trigger.radius = Mathf.Min(Mathf.Max(hole.Width, hole.Height) * 0.5f, maxRadiusWithoutProtrudingAboveLid);
-
-        var attach = new GameObject("Attach");
-        attach.transform.SetParent(socketObject.transform, false);
-        attach.transform.localPosition = new Vector3(0f, (innerFloorY + 0.03f) - socketCenterY, 0f);
-
-        var socket = socketObject.AddComponent<XRSocketInteractor>();
-        socket.attachTransform = attach.transform;
-        socket.recycleDelayTime = 0.35f;
-        socket.interactionLayers = new InteractionLayerMask { value = 1 << GetShapeInteractionLayerIndex(index) };
+        var grabDropperType = Type.GetType("VRGrabDistanceDropper, Assembly-CSharp");
+        if (grabDropperType != null)
+            piece.AddComponent(grabDropperType);
+        else
+            EditorPrefs.SetBool(PendingSetupPrefKey, true);
     }
 
     static Mesh CreateSortingTopMesh(float width, float depth, float thickness, SortingHole[] holes)
     {
-        // 7 mm grid gives ~18k watertight triangles (top, bottom, and inner hole walls) — Quest-friendly.
         const float cellSize = 0.007f;
         int xCells = Mathf.CeilToInt(width / cellSize);
         int zCells = Mathf.CeilToInt(depth / cellSize);
@@ -848,11 +881,8 @@ public static class VRRoomBuilder
 
             var tris = new[]
             {
-                // Bottom (-Y)
                 0, 1, 2, 0, 2, 3,
-                // Top (+Y)
                 4, 6, 5, 4, 7, 6,
-                // Sides
                 0, 4, 5, 0, 5, 1,
                 1, 5, 6, 1, 6, 2,
                 2, 6, 7, 2, 7, 3,
@@ -870,6 +900,246 @@ public static class VRRoomBuilder
         return meshes;
     }
 
+    // ---------------------------------------------------------------- Runtime Scripts Generator
+
+    static void EnsureRuntimeScriptsExist()
+    {
+        Directory.CreateDirectory(ScriptDir);
+        bool anyChanged = false;
+
+        string grabDropperPath = $"{ScriptDir}/VRGrabDistanceDropper.cs";
+        string grabDropperCode = @"using UnityEngine;
+using UnityEngine.XR.Interaction.Toolkit;
+using UnityEngine.XR.Interaction.Toolkit.Interactables;
+using UnityEngine.XR.Interaction.Toolkit.Interactors;
+
+/// <summary>
+/// Keeps held pieces physically blocked by solid obstacles and drops them from the hand
+/// if the player moves their hand too far away from the blocked object.
+/// </summary>
+[RequireComponent(typeof(XRGrabInteractable), typeof(Rigidbody))]
+public class VRGrabDistanceDropper : MonoBehaviour
+{
+    [Tooltip(""Maximum distance (metres) the hand can pull away from a physically blocked object before dropping it."")]
+    public float maxHandStretchDistance = 0.13f;
+
+    [Tooltip(""Tighter break distance (metres) while the piece is actively colliding against a solid surface."")]
+    public float blockedBreakDistance = 0.10f;
+
+    XRGrabInteractable m_Interactable;
+    Rigidbody m_Rigidbody;
+    IXRSelectInteractor m_CurrentInteractor;
+    float m_GrabStartTime;
+    int m_SolidContactCount;
+
+    void Awake()
+    {
+        m_Interactable = GetComponent<XRGrabInteractable>();
+        m_Rigidbody = GetComponent<Rigidbody>();
+    }
+
+    void OnEnable()
+    {
+        m_Interactable.selectEntered.AddListener(OnSelectEntered);
+        m_Interactable.selectExited.AddListener(OnSelectExited);
+    }
+
+    void OnDisable()
+    {
+        m_Interactable.selectEntered.RemoveListener(OnSelectEntered);
+        m_Interactable.selectExited.RemoveListener(OnSelectExited);
+        m_CurrentInteractor = null;
+        m_SolidContactCount = 0;
+    }
+
+    void OnSelectEntered(SelectEnterEventArgs args)
+    {
+        m_CurrentInteractor = args.interactorObject;
+        m_GrabStartTime = Time.time;
+        m_SolidContactCount = 0;
+    }
+
+    void OnSelectExited(SelectExitEventArgs args)
+    {
+        if (args.interactorObject == m_CurrentInteractor)
+            m_CurrentInteractor = null;
+    }
+
+    void OnCollisionEnter(Collision collision)
+    {
+        if (collision.collider != null && !collision.collider.isTrigger)
+            m_SolidContactCount++;
+    }
+
+    void OnCollisionExit(Collision collision)
+    {
+        if (collision.collider != null && !collision.collider.isTrigger)
+            m_SolidContactCount = Mathf.Max(0, m_SolidContactCount - 1);
+    }
+
+    void FixedUpdate()
+    {
+        if (!m_Interactable.isSelected || m_CurrentInteractor == null)
+            return;
+
+        // Allow brief initial settle when grabbing via near-far ray.
+        if (Time.time - m_GrabStartTime < 0.15f)
+            return;
+
+        Transform handAttach = m_CurrentInteractor.GetAttachTransform(m_Interactable);
+        Transform pieceAttach = m_Interactable.GetAttachTransform(m_CurrentInteractor);
+        if (handAttach == null || pieceAttach == null)
+            return;
+
+        float breakLimit = m_SolidContactCount > 0 ? blockedBreakDistance : maxHandStretchDistance;
+        float distance = Vector3.Distance(handAttach.position, pieceAttach.position);
+
+        if (distance > breakLimit)
+        {
+#if UNITY_6000_0_OR_NEWER
+            m_Rigidbody.linearVelocity *= 0.1f;
+            m_Rigidbody.angularVelocity *= 0.1f;
+#else
+            m_Rigidbody.velocity *= 0.1f;
+            m_Rigidbody.angularVelocity *= 0.1f;
+#endif
+            if (m_Interactable.interactionManager != null)
+                m_Interactable.interactionManager.SelectExit(m_CurrentInteractor, m_Interactable);
+        }
+    }
+}
+";
+        anyChanged |= WriteFileIfDifferent(grabDropperPath, grabDropperCode);
+
+        string wallGuardPath = $"{ScriptDir}/VRPlayerWallCollisionGuard.cs";
+        string wallGuardCode = @"using Unity.XR.CoreUtils;
+using UnityEngine;
+using UnityEngine.XR.Interaction.Toolkit.Interactables;
+
+/// <summary>
+/// Prevents the VR player from passing through room walls or furniture during both
+/// controller locomotion and physical/simulator headset movement.
+/// </summary>
+public class VRPlayerWallCollisionGuard : MonoBehaviour
+{
+    public float playerRadius = 0.25f;
+    public float roomHalfWidth = 2.72f;
+    public float roomHalfDepth = 2.72f;
+
+    XROrigin m_Origin;
+    CharacterController m_CharacterController;
+    readonly Collider[] m_OverlapBuffer = new Collider[24];
+
+    [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
+    static void AutoInstallAtRuntime()
+    {
+        var origin = FindAnyObjectByType<XROrigin>();
+        if (origin != null && origin.GetComponent<VRPlayerWallCollisionGuard>() == null)
+            origin.gameObject.AddComponent<VRPlayerWallCollisionGuard>();
+
+        var game = GameObject.Find(""Shape Sorting Game"");
+        if (game != null)
+        {
+            var interactables = game.GetComponentsInChildren<XRGrabInteractable>(true);
+            foreach (var item in interactables)
+            {
+                if (item.GetComponent<VRGrabDistanceDropper>() == null)
+                    item.gameObject.AddComponent<VRGrabDistanceDropper>();
+            }
+        }
+    }
+
+    void Awake()
+    {
+        m_Origin = GetComponent<XROrigin>();
+        m_CharacterController = GetComponentInChildren<CharacterController>(true);
+    }
+
+    void LateUpdate()
+    {
+        if (m_Origin == null)
+            m_Origin = GetComponent<XROrigin>();
+
+        Camera cam = m_Origin != null ? m_Origin.Camera : Camera.main;
+        if (cam == null)
+            return;
+
+        Vector3 headWorld = cam.transform.position;
+        Vector3 originPos = transform.position;
+
+        if (m_CharacterController != null && m_CharacterController.enabled)
+        {
+            Vector3 headLocal = transform.InverseTransformPoint(headWorld);
+            float height = Mathf.Clamp(headLocal.y, 0.5f, 2.2f);
+            m_CharacterController.height = height;
+            m_CharacterController.radius = playerRadius;
+            m_CharacterController.center = new Vector3(headLocal.x, height * 0.5f, headLocal.z);
+        }
+
+        // Resolve physical/simulator head penetration against solid walls & furniture.
+        Vector3 bottom = new Vector3(headWorld.x, originPos.y + playerRadius + 0.12f, headWorld.z);
+        Vector3 top = new Vector3(headWorld.x, Mathf.Max(bottom.y + 0.2f, headWorld.y), headWorld.z);
+
+        int count = Physics.OverlapCapsuleNonAlloc(bottom, top, playerRadius, m_OverlapBuffer, ~0, QueryTriggerInteraction.Ignore);
+        if (count > 0)
+        {
+            // Temporarily create/use a capsule query via ComputePenetration against each solid collider.
+            for (int i = 0; i < count; i++)
+            {
+                Collider other = m_OverlapBuffer[i];
+                if (other == null || other == m_CharacterController)
+                    continue;
+                if (other.transform.IsChildOf(transform))
+                    continue;
+                if (other.GetComponentInParent<XRGrabInteractable>() != null)
+                    continue;
+
+                Vector3 closest = other.ClosestPoint(new Vector3(headWorld.x, (bottom.y + top.y) * 0.5f, headWorld.z));
+                Vector3 delta = new Vector3(headWorld.x - closest.x, 0f, headWorld.z - closest.z);
+                float dist = delta.magnitude;
+                if (dist < playerRadius)
+                {
+                    Vector3 pushDir = dist > 0.0001f
+                        ? delta / dist
+                        : new Vector3(-headWorld.x, 0f, -headWorld.z).normalized;
+                    float penetration = playerRadius - dist;
+                    transform.position += pushDir * penetration;
+                    headWorld += pushDir * penetration;
+                }
+            }
+        }
+
+        // Hard room boundary clamp so the camera can never exit the 6x6m room walls.
+        Vector3 currentHead = cam.transform.position;
+        Vector3 correction = Vector3.zero;
+        if (currentHead.x > roomHalfWidth) correction.x = roomHalfWidth - currentHead.x;
+        else if (currentHead.x < -roomHalfWidth) correction.x = -roomHalfWidth - currentHead.x;
+
+        if (currentHead.z > roomHalfDepth) correction.z = roomHalfDepth - currentHead.z;
+        else if (currentHead.z < -roomHalfDepth) correction.z = -roomHalfDepth - currentHead.z;
+
+        if (correction.sqrMagnitude > 0f)
+            transform.position += correction;
+    }
+}
+";
+        anyChanged |= WriteFileIfDifferent(wallGuardPath, wallGuardCode);
+
+        if (anyChanged)
+        {
+            AssetDatabase.Refresh();
+            EditorPrefs.SetBool(PendingSetupPrefKey, true);
+        }
+    }
+
+    static bool WriteFileIfDifferent(string path, string content)
+    {
+        if (File.Exists(path) && File.ReadAllText(path) == content)
+            return false;
+        File.WriteAllText(path, content);
+        return true;
+    }
+
     // ---------------------------------------------------------------- XR + environment
 
     static void AddXROrigin()
@@ -882,7 +1152,6 @@ public static class VRRoomBuilder
             return;
         }
         var origin = (GameObject)PrefabUtility.InstantiatePrefab(prefab);
-        // Stand ~0.9 m from the long side of the table, facing it
         origin.transform.position = new Vector3(TablePos.x, 0, TablePos.z - TableD / 2 - 0.9f);
         origin.transform.rotation = Quaternion.identity;
         FixPhysicsCollisionsInScene();
@@ -897,7 +1166,6 @@ public static class VRRoomBuilder
         RenderSettings.ambientGroundColor = new Color(0.22f, 0.18f, 0.15f);
         RenderSettings.fog = false;
 
-        // Reflection probe so the table/metal pick up the room instead of a black sky
         var probeGO = new GameObject("Reflection Probe");
         probeGO.transform.position = new Vector3(0, 1.5f, 0);
         var probe = probeGO.AddComponent<ReflectionProbe>();
@@ -927,7 +1195,7 @@ public static class VRRoomBuilder
         go.transform.localPosition = localPos;
         go.transform.localScale = size;
         go.GetComponent<Renderer>().sharedMaterial = mat;
-        if (!collider) Object.DestroyImmediate(go.GetComponent<Collider>());
+        if (!collider) UnityEngine.Object.DestroyImmediate(go.GetComponent<Collider>());
         GameObjectUtility.SetStaticEditorFlags(go,
             StaticEditorFlags.BatchingStatic | StaticEditorFlags.OccluderStatic |
             StaticEditorFlags.OccludeeStatic | StaticEditorFlags.ReflectionProbeStatic);
@@ -937,7 +1205,6 @@ public static class VRRoomBuilder
     static void MakeTeleportable(GameObject floor)
     {
         var area = floor.AddComponent<TeleportationArea>();
-        // The XRI starter teleport interactor only targets the "Teleport" interaction layer
         if (InteractionLayerMask.NameToLayer("Teleport") >= 0)
             area.interactionLayers = InteractionLayerMask.GetMask("Teleport");
     }
@@ -986,7 +1253,7 @@ public static class VRRoomBuilder
         {
             existing.Clear();
             EditorUtility.CopySerialized(mesh, existing);
-            Object.DestroyImmediate(mesh);
+            UnityEngine.Object.DestroyImmediate(mesh);
             EditorUtility.SetDirty(existing);
             return existing;
         }
