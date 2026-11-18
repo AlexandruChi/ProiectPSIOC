@@ -210,6 +210,7 @@ public static class VRRoomBuilder
             body.maxDepenetrationVelocity = 1.5f;
 
             interactable.movementType = XRBaseInteractable.MovementType.VelocityTracking;
+            interactable.useDynamicAttach = true;
             interactable.velocityScale = 0.85f;
             interactable.velocityDamping = 1f;
             interactable.angularVelocityScale = 0.85f;
@@ -602,6 +603,7 @@ public static class VRRoomBuilder
         var grab = piece.AddComponent<XRGrabInteractable>();
         grab.throwOnDetach = true;
         grab.trackRotation = true;
+        grab.useDynamicAttach = true;
         grab.movementType = XRBaseInteractable.MovementType.VelocityTracking;
         grab.velocityScale = 0.85f;
         grab.velocityDamping = 1f;
@@ -908,34 +910,50 @@ public static class VRRoomBuilder
         bool anyChanged = false;
 
         string grabDropperPath = $"{ScriptDir}/VRGrabDistanceDropper.cs";
-        string grabDropperCode = @"using UnityEngine;
+        string grabDropperCode = @"using System.Collections.Generic;
+using Unity.XR.CoreUtils;
+using UnityEngine;
 using UnityEngine.XR.Interaction.Toolkit;
 using UnityEngine.XR.Interaction.Toolkit.Interactables;
 using UnityEngine.XR.Interaction.Toolkit.Interactors;
 
 /// <summary>
-/// Keeps held pieces physically blocked by solid obstacles and drops them from the hand
-/// if the player moves their hand too far away from the blocked object.
+/// Ignores player/controller colliders so pulling an object close (e.g. with I/K in simulator)
+/// never knocks it out of the hand, and only drops a held piece when it is genuinely blocked
+/// against a solid environment surface and the hand/anchor pushes deeply past that surface.
 /// </summary>
 [RequireComponent(typeof(XRGrabInteractable), typeof(Rigidbody))]
 public class VRGrabDistanceDropper : MonoBehaviour
 {
-    [Tooltip(""Maximum distance (metres) the hand can pull away from a physically blocked object before dropping it."")]
-    public float maxHandStretchDistance = 0.13f;
+    [Tooltip(""Distance (metres) the hand/anchor must push PAST a blocking surface into the obstacle before releasing."")]
+    public float maxPenetrationStretch = 0.24f;
 
-    [Tooltip(""Tighter break distance (metres) while the piece is actively colliding against a solid surface."")]
-    public float blockedBreakDistance = 0.10f;
+    [Tooltip(""Total hand-to-piece offset (metres) while pressed against a solid obstacle before releasing."")]
+    public float maxBlockedTotalStretch = 0.32f;
+
+    [Tooltip(""Time (seconds) of sustained push against a solid obstacle before dropping."")]
+    public float blockedDropDelay = 0.22f;
 
     XRGrabInteractable m_Interactable;
     Rigidbody m_Rigidbody;
     IXRSelectInteractor m_CurrentInteractor;
-    float m_GrabStartTime;
-    int m_SolidContactCount;
+    Collider[] m_PieceColliders;
+    readonly HashSet<Collider> m_IgnoredPlayerColliders = new HashSet<Collider>();
+
+    int m_FrameContactCount;
+    Vector3 m_FrameContactNormalSum;
+    float m_BlockedTimer;
 
     void Awake()
     {
         m_Interactable = GetComponent<XRGrabInteractable>();
         m_Rigidbody = GetComponent<Rigidbody>();
+        m_PieceColliders = GetComponentsInChildren<Collider>(true);
+    }
+
+    void Start()
+    {
+        IgnorePlayerAndControllerColliders();
     }
 
     void OnEnable()
@@ -949,63 +967,138 @@ public class VRGrabDistanceDropper : MonoBehaviour
         m_Interactable.selectEntered.RemoveListener(OnSelectEntered);
         m_Interactable.selectExited.RemoveListener(OnSelectExited);
         m_CurrentInteractor = null;
-        m_SolidContactCount = 0;
+        m_FrameContactCount = 0;
+        m_FrameContactNormalSum = Vector3.zero;
+        m_BlockedTimer = 0f;
     }
 
     void OnSelectEntered(SelectEnterEventArgs args)
     {
         m_CurrentInteractor = args.interactorObject;
-        m_GrabStartTime = Time.time;
-        m_SolidContactCount = 0;
+        m_BlockedTimer = 0f;
+        IgnorePlayerAndControllerColliders();
     }
 
     void OnSelectExited(SelectExitEventArgs args)
     {
         if (args.interactorObject == m_CurrentInteractor)
+        {
             m_CurrentInteractor = null;
+            m_BlockedTimer = 0f;
+        }
+    }
+
+    void IgnorePlayerAndControllerColliders()
+    {
+        var origin = FindAnyObjectByType<XROrigin>();
+        if (origin == null || m_PieceColliders == null)
+            return;
+
+        var playerColliders = origin.GetComponentsInChildren<Collider>(true);
+        for (int i = 0; i < playerColliders.Length; i++)
+        {
+            Collider playerCol = playerColliders[i];
+            if (playerCol == null || m_IgnoredPlayerColliders.Contains(playerCol))
+                continue;
+
+            m_IgnoredPlayerColliders.Add(playerCol);
+            for (int j = 0; j < m_PieceColliders.Length; j++)
+            {
+                if (m_PieceColliders[j] != null)
+                    Physics.IgnoreCollision(m_PieceColliders[j], playerCol, true);
+            }
+        }
+    }
+
+    bool IsIgnoredOrPlayerCollider(Collider col)
+    {
+        if (col == null || col.isTrigger)
+            return true;
+        if (m_IgnoredPlayerColliders.Contains(col))
+            return true;
+        if (col.GetComponentInParent<XROrigin>() != null)
+        {
+            IgnorePlayerAndControllerColliders();
+            return true;
+        }
+        return false;
+    }
+
+    void AccumulateContacts(Collision collision)
+    {
+        if (IsIgnoredOrPlayerCollider(collision.collider))
+            return;
+
+        int count = collision.contactCount;
+        for (int i = 0; i < count; i++)
+        {
+            m_FrameContactNormalSum += collision.GetContact(i).normal;
+            m_FrameContactCount++;
+        }
     }
 
     void OnCollisionEnter(Collision collision)
     {
-        if (collision.collider != null && !collision.collider.isTrigger)
-            m_SolidContactCount++;
+        AccumulateContacts(collision);
     }
 
-    void OnCollisionExit(Collision collision)
+    void OnCollisionStay(Collision collision)
     {
-        if (collision.collider != null && !collision.collider.isTrigger)
-            m_SolidContactCount = Mathf.Max(0, m_SolidContactCount - 1);
+        AccumulateContacts(collision);
     }
 
     void FixedUpdate()
     {
-        if (!m_Interactable.isSelected || m_CurrentInteractor == null)
+        if (!m_Interactable.isSelected || m_CurrentInteractor == null || m_FrameContactCount == 0)
+        {
+            m_BlockedTimer = 0f;
+            m_FrameContactCount = 0;
+            m_FrameContactNormalSum = Vector3.zero;
             return;
-
-        // Allow brief initial settle when grabbing via near-far ray.
-        if (Time.time - m_GrabStartTime < 0.15f)
-            return;
+        }
 
         Transform handAttach = m_CurrentInteractor.GetAttachTransform(m_Interactable);
-        Transform pieceAttach = m_Interactable.GetAttachTransform(m_CurrentInteractor);
-        if (handAttach == null || pieceAttach == null)
-            return;
-
-        float breakLimit = m_SolidContactCount > 0 ? blockedBreakDistance : maxHandStretchDistance;
-        float distance = Vector3.Distance(handAttach.position, pieceAttach.position);
-
-        if (distance > breakLimit)
+        Transform pieceAttach = m_Interactable.GetAttachTransform(m_Interactable);
+        if (handAttach != null && pieceAttach != null && m_FrameContactNormalSum.sqrMagnitude > 0.0001f)
         {
+            // Normal points OUT of the blocking surface toward the held piece.
+            Vector3 surfaceNormal = m_FrameContactNormalSum.normalized;
+            Vector3 handOffsetFromPiece = handAttach.position - pieceAttach.position;
+
+            // Positive when the hand/anchor has pushed past the blocked piece INTO the solid obstacle.
+            float pushIntoObstacle = Vector3.Dot(-handOffsetFromPiece, surfaceNormal);
+            float totalOffset = handOffsetFromPiece.magnitude;
+
+            bool forcingIntoSolid =
+                pushIntoObstacle > maxPenetrationStretch ||
+                (pushIntoObstacle > 0.04f && totalOffset > maxBlockedTotalStretch);
+
+            if (forcingIntoSolid)
+            {
+                m_BlockedTimer += Time.fixedDeltaTime;
+                if (m_BlockedTimer >= blockedDropDelay)
+                {
 #if UNITY_6000_0_OR_NEWER
-            m_Rigidbody.linearVelocity *= 0.1f;
-            m_Rigidbody.angularVelocity *= 0.1f;
+                    m_Rigidbody.linearVelocity *= 0.05f;
+                    m_Rigidbody.angularVelocity *= 0.05f;
 #else
-            m_Rigidbody.velocity *= 0.1f;
-            m_Rigidbody.angularVelocity *= 0.1f;
+                    m_Rigidbody.velocity *= 0.05f;
+                    m_Rigidbody.angularVelocity *= 0.05f;
 #endif
-            if (m_Interactable.interactionManager != null)
-                m_Interactable.interactionManager.SelectExit(m_CurrentInteractor, m_Interactable);
+                    if (m_Interactable.interactionManager != null)
+                        m_Interactable.interactionManager.SelectExit(m_CurrentInteractor, m_Interactable);
+                    m_BlockedTimer = 0f;
+                }
+            }
+            else
+            {
+                // Sliding along a table/lid or pulling away from a wall should never drop the piece.
+                m_BlockedTimer = Mathf.Max(0f, m_BlockedTimer - Time.fixedDeltaTime * 2f);
+            }
         }
+
+        m_FrameContactCount = 0;
+        m_FrameContactNormalSum = Vector3.zero;
     }
 }
 ";
@@ -1083,7 +1176,6 @@ public class VRPlayerWallCollisionGuard : MonoBehaviour
         int count = Physics.OverlapCapsuleNonAlloc(bottom, top, playerRadius, m_OverlapBuffer, ~0, QueryTriggerInteraction.Ignore);
         if (count > 0)
         {
-            // Temporarily create/use a capsule query via ComputePenetration against each solid collider.
             for (int i = 0; i < count; i++)
             {
                 Collider other = m_OverlapBuffer[i];
